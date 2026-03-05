@@ -1,5 +1,5 @@
 import twilio from 'twilio';
-import AWS from 'aws-sdk';
+import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 import prisma from '../config/database';
 import { cacheSet, cacheGet, cacheDel } from '../config/redis';
 import { logger } from '../utils/logger';
@@ -24,10 +24,10 @@ const shouldSendViaTwilio = (): boolean => {
 };
 
 const shouldSendViaSNS = (): boolean => {
-  const enabled = String(process.env.AWS_SNS_ENABLED || '').trim() === 'true';
+  const enabled = String(process.env.SNS_ENABLED || '').trim() === 'true';
   if (!enabled) return false;
   if (process.env.NODE_ENV === 'production') return true;
-  return String(process.env.AWS_SNS_SEND_IN_DEV || '').trim() === 'true';
+  return String(process.env.SNS_SEND_IN_DEV || '').trim() === 'true';
 };
 
 export class OtpService {
@@ -66,10 +66,10 @@ export class OtpService {
 
     if (snsPreferred) {
       try {
-        const region = String(process.env.AWS_REGION || 'ap-south-1').trim();
-        const sns = new AWS.SNS({ region });
-        await sns
-          .publish({
+        const region = String(process.env.SNS_REGION || 'ap-south-1').trim();
+        const sns = new SNSClient({ region });
+        await sns.send(
+          new PublishCommand({
             PhoneNumber: phoneNumber,
             Message: `Your DriveMate OTP is: ${otp}`,
             MessageAttributes: {
@@ -79,7 +79,7 @@ export class OtpService {
               },
             },
           })
-          .promise();
+        );
         logger.info(`OTP sent via SNS to ${phoneNumber}`);
       } catch (error) {
         logger.error('SNS error:', error);

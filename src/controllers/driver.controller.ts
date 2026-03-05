@@ -36,9 +36,9 @@ export class DriverController {
       throw new AppError('Not authenticated', 401);
     }
 
-    const bucket = String(process.env.RAILWAY_BUCKET_NAME || process.env.AWS_S3_BUCKET || 'drivemate').trim();
+    const bucket = String(process.env.S3_BUCKET || process.env.RAILWAY_BUCKET_NAME || 'drivemate').trim();
 
-    const region = String(process.env.RAILWAY_BUCKET_REGION || process.env.AWS_REGION || 'us-east-1').trim();
+    const region = String(process.env.S3_REGION || process.env.RAILWAY_BUCKET_REGION || 'ap-south-1').trim();
     const endpoint = String(process.env.S3_ENDPOINT || process.env.RAILWAY_BUCKET_ENDPOINT || process.env.RAILWAY_BUCKET_URL_PUB || '').trim();
 
     if (!bucket) {
@@ -77,10 +77,10 @@ export class DriverController {
     const s3 = new S3Client({
       region,
       endpoint: endpoint ? endpoint : undefined,
-      forcePathStyle: true, // Crucial for S3-compatible services like Railway Buckets
+      forcePathStyle: !!endpoint, // Crucial for S3-compatible like Railway, false for standard AWS S3
       credentials: {
-        accessKeyId: String(process.env.RAILWAY_BUCKET_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || '').trim(),
-        secretAccessKey: String(process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || '').trim()
+        accessKeyId: String(process.env.S3_ACCESS_KEY_ID || process.env.RAILWAY_BUCKET_ACCESS_KEY_ID || '').trim(),
+        secretAccessKey: String(process.env.S3_SECRET_ACCESS_KEY || process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY || '').trim()
       }
     });
 
@@ -93,16 +93,18 @@ export class DriverController {
     const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 5 });
 
     let fileUrl = '';
-    const publicUrlBase = String(process.env.RAILWAY_BUCKET_PUBLIC_URL || process.env.CLOUDFRONT_BASE_URL || endpoint || `https://${bucket}.s3.${region}.amazonaws.com`).replace(/\/$/, '');
+    const publicUrlBase = String(process.env.RAILWAY_BUCKET_PUBLIC_URL || process.env.CLOUDFRONT_BASE_URL || endpoint || `https://${bucket}.s3.${region}.custom-domain.com`).replace(/\/$/, '');
 
     // If it's a raw S3-compatible endpoint, we append the bucket name manually in path style
     if (publicUrlBase === endpoint && endpoint.includes('railway')) {
       fileUrl = `${publicUrlBase}/${bucket}/${key}`;
+    } else if (publicUrlBase !== endpoint) {
+      fileUrl = `${publicUrlBase}/${key}`;
     } else {
       fileUrl = `${publicUrlBase}/${key}`;
     }
 
-    logger.info('presignUpload generated for Railway Bucket / S3', {
+    logger.info('presignUpload generated for Storage', {
       bucket,
       key,
     });
