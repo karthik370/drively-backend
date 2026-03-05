@@ -1,0 +1,1116 @@
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  extensions = [postgis]
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum UserType {
+  CUSTOMER
+  DRIVER
+  BOTH
+}
+
+enum MembershipType {
+  NONE
+  BASIC
+  PREMIUM
+  CORPORATE
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+enum VehicleType {
+  CAR
+  SUV
+  HATCHBACK
+  SEDAN
+  LUXURY
+}
+
+enum TransmissionType {
+  MANUAL
+  AUTOMATIC
+}
+
+enum Specialization {
+  CITY
+  HIGHWAY
+  NIGHT
+  ELDERLY_CARE
+  FEMALE_ONLY
+}
+
+enum BookingType {
+  CITY
+  OUTSTATION
+  HOURLY
+}
+
+enum TripType {
+  ONE_WAY
+  ROUND_TRIP
+  OUTSTATION
+}
+
+enum BookingStatus {
+  REQUESTED
+  SEARCHING
+  ACCEPTED
+  DRIVER_ARRIVING
+  ARRIVED
+  STARTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  DISPUTED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  WALLET
+  NET_BANKING
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  REFUNDED
+  FAILED
+  PARTIALLY_REFUNDED
+}
+
+enum WalletTransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum WalletTransactionReason {
+  TOPUP
+  BOOKING_PAYMENT
+  REFUND
+  TIP
+  ADJUSTMENT
+}
+
+enum WalletTransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum MembershipPurchaseStatus {
+  PENDING
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum TipStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum InvoiceStatus {
+  GENERATED
+  FAILED
+}
+
+enum CancelledBy {
+  CUSTOMER
+  DRIVER
+  SYSTEM
+  ADMIN
+}
+
+enum SubscriptionStatus {
+  INACTIVE
+  ACTIVE
+  EXPIRED
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PromotionType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  FIRST_RIDE
+  CASHBACK
+}
+
+enum TicketCategory {
+  PAYMENT
+  DRIVER_ISSUE
+  APP_BUG
+  ACCIDENT
+  SAFETY
+  BOOKING
+  OTHER
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+  CRITICAL
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_CUSTOMER
+  WAITING_DRIVER
+  RESOLVED
+  CLOSED
+}
+
+enum NotificationType {
+  BOOKING
+  PAYMENT
+  PROMOTION
+  SYSTEM
+  SAFETY
+  DRIVER_UPDATE
+  DOCUMENT_UPDATE
+}
+
+enum InsuranceType {
+  TRIP
+  ACCIDENT
+  SUBSCRIPTION
+  LIABILITY
+}
+
+enum IncentiveType {
+  PERFORMANCE
+  REFERRAL
+  MILESTONE
+  SURGE
+  BONUS
+}
+
+enum DriverRefundStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+enum VehicleStatus {
+  AVAILABLE
+  IN_USE
+  MAINTENANCE
+  RETIRED
+}
+
+enum EmergencyStatus {
+  ACTIVE
+  RESOLVED
+  FALSE_ALARM
+}
+
+model User {
+  id                    String             @id @default(uuid())
+  phoneNumber           String             @unique @db.VarChar(15)
+  phoneVerified         Boolean            @default(false)
+  email                 String?            @unique @db.VarChar(255)
+  emailVerified         Boolean            @default(false)
+  password              String?            @db.VarChar(255)
+  firstName             String             @db.VarChar(100)
+  lastName              String             @db.VarChar(100)
+  profileImage          String?            @db.Text
+  dateOfBirth           DateTime?
+  gender                Gender?
+  userType              UserType           @default(CUSTOMER)
+  isVerified            Boolean            @default(false)
+  isActive              Boolean            @default(true)
+  isBlocked             Boolean            @default(false)
+  deviceTokens          String[]           @default([])
+  preferredLanguage     String             @default("en") @db.VarChar(10)
+  rating                Decimal            @default(0) @db.Decimal(3, 2)
+  totalRatings          Int                @default(0)
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+  lastLoginAt           DateTime?
+  lastLocationUpdate    DateTime?
+  
+  customerProfile       CustomerProfile?
+  driverProfile         DriverProfile?
+  customerBookings      Booking[]          @relation("CustomerBookings")
+  driverBookings        Booking[]          @relation("DriverBookings")
+  payments              Payment[]
+  supportTickets        SupportTicket[]
+  notifications         Notification[]
+  expoPushTokens        ExpoPushToken[]
+  insurances            Insurance[]
+  ratingsGiven          Rating[]           @relation("RatingGiven")
+  ratingsReceived       Rating[]           @relation("RatingReceived")
+  referralCode          ReferralCode?      @relation("ReferralOwner")
+  referredBy            ReferralCode?      @relation("ReferredUsers", fields: [referredById], references: [id])
+  referredById          String?
+  emergenciesTriggered  Emergency[]
+  sessions              Session[]
+  otpVerifications      OtpVerification[]
+
+  walletTransactions     WalletTransaction[]
+  membershipPurchases    MembershipPurchase[]
+  tipsGiven              Tip[]              @relation("TipsGiven")
+  tipsReceived           Tip[]              @relation("TipsReceived")
+  promotionRedemptions   PromotionRedemption[]
+
+  // Phase 2-3 relations
+  referrerReferrals      Referral[]           @relation("ReferrerReferrals")
+  referredReferrals      Referral[]           @relation("ReferredReferrals")
+  incentiveProgress      DriverIncentiveProgress[]
+  driverPayouts          DriverPayout[]
+  rewardsCoins           RewardsCoin[]
+
+  @@index([phoneNumber])
+  @@index([email])
+  @@index([userType])
+  @@index([isActive])
+  @@index([createdAt])
+  @@map("users")
+}
+
+model CustomerProfile {
+  id                    String             @id @default(uuid())
+  userId                String             @unique
+  user                  User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  savedAddresses        Json[]             @default([])
+  favoriteDriverIds     String[]           @default([])
+  membershipType        MembershipType     @default(NONE)
+  membershipExpiryDate  DateTime?
+  corporateId           String?
+  corporate             Corporate?         @relation(fields: [corporateId], references: [id])
+  emergencyContacts     Json[]             @default([])
+  preferences           Json               @default("{}")
+  walletBalance         Decimal            @default(0) @db.Decimal(10, 2)
+  totalSpent            Decimal            @default(0) @db.Decimal(10, 2)
+  totalTrips            Int                @default(0)
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  @@index([userId])
+  @@index([corporateId])
+  @@map("customer_profiles")
+}
+
+model DriverProfile {
+  id                        String                @id @default(uuid())
+  userId                    String                @unique
+  user                      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  licenseNumber             String                @unique @db.VarChar(50)
+  licenseExpiryDate         DateTime
+  licenseImageUrl           String                @db.Text
+  aadhaarNumber             String                @unique @db.VarChar(255)
+  aadhaarImageUrl           String                @db.Text
+  panNumber                 String                @unique @db.VarChar(20)
+  panImageUrl               String                @db.Text
+  policeVerificationStatus  VerificationStatus    @default(PENDING)
+  policeVerificationDate    DateTime?
+  bankAccountNumber         String                @db.VarChar(255)
+  bankIfscCode              String                @db.VarChar(20)
+  bankAccountHolderName     String                @db.VarChar(255)
+  upiId                     String?               @db.VarChar(100)
+  currentLatitude           Float?
+  currentLongitude          Float?
+  currentLocationLat        Decimal?              @db.Decimal(10, 8)
+  currentLocationLng        Decimal?              @db.Decimal(11, 8)
+  lastLocationUpdate        DateTime?
+  currentSpeed              Float?
+  currentHeading            Float?
+  batteryLevel              Int?
+  isOnline                  Boolean               @default(false)
+  isAvailable               Boolean               @default(true)
+  vehicleTypes              VehicleType[]         @default([])
+  specializations           Specialization[]      @default([])
+  languagesSpoken           String[]              @default(["en"])
+  uniformIssued             Boolean               @default(false)
+  trainingCompleted         Boolean               @default(false)
+  trainingCompletionDate    DateTime?
+  insurancePolicyNumber     String?               @db.VarChar(100)
+  insuranceExpiryDate       DateTime?
+  totalTrips                Int                   @default(0)
+  totalEarnings             Decimal               @default(0) @db.Decimal(10, 2)
+  pendingEarnings           Decimal               @default(0) @db.Decimal(10, 2)
+  acceptanceRate            Decimal               @default(0) @db.Decimal(5, 2)
+  cancellationRate          Decimal               @default(0) @db.Decimal(5, 2)
+  averageResponseTime       Int                   @default(0)
+  workingHours              Json?
+  documentsVerified         Boolean               @default(false)
+  backgroundCheckStatus     VerificationStatus    @default(PENDING)
+  isExperienced             Boolean               @default(false)
+  currentVehicleId          String?               @unique
+  currentVehicle            Vehicle?              @relation("CurrentDriver", fields: [currentVehicleId], references: [id])
+  subscription              DriverSubscription?
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+
+  locations                 Location[]
+  refunds                   DriverRefund[]
+
+  @@index([userId])
+  @@index([isOnline])
+  @@index([isAvailable])
+  @@index([isOnline, isAvailable])
+  @@index([currentLatitude, currentLongitude])
+  @@index([currentLocationLat, currentLocationLng])
+  @@map("driver_profiles")
+}
+
+model Booking {
+  id                    String             @id @default(uuid())
+  bookingNumber         String             @unique @default(cuid())
+  customerId            String
+  customer              User               @relation("CustomerBookings", fields: [customerId], references: [id])
+  driverId              String?
+  driver                User?              @relation("DriverBookings", fields: [driverId], references: [id])
+  bookingType           BookingType        @default(CITY)
+  tripType              TripType           @default(ONE_WAY)
+  status                BookingStatus      @default(REQUESTED)
+  pickupLocationLat     Decimal            @db.Decimal(10, 8)
+  pickupLocationLng     Decimal            @db.Decimal(11, 8)
+  pickupAddress         String             @db.Text
+  dropLocationLat       Decimal?           @db.Decimal(10, 8)
+  dropLocationLng       Decimal?           @db.Decimal(11, 8)
+  dropAddress           String?            @db.Text
+  scheduledTime         DateTime?
+  acceptedAt            DateTime?
+  arrivedAt             DateTime?
+  startedAt             DateTime?
+  completedAt           DateTime?
+  estimatedDistance     Decimal?           @db.Decimal(10, 2)
+  actualDistance        Decimal?           @db.Decimal(10, 2)
+  driverTravelDistanceKm Decimal           @default(0) @db.Decimal(10, 2)
+  estimatedDuration     Int?
+  actualDuration        Int?
+  vehicleType           VehicleType        @default(CAR)
+  transmissionType      TransmissionType   @default(MANUAL)
+  customerVehicleDetails Json?
+  specialRequests       String?            @db.Text
+  pricingBreakdown      Json?
+  totalAmount           Decimal            @default(0) @db.Decimal(10, 2)
+  driverEarnings        Decimal            @default(0) @db.Decimal(10, 2)
+  platformCommission    Decimal            @default(0) @db.Decimal(10, 2)
+  commissionPercentage  Decimal            @default(12) @db.Decimal(5, 2)
+  promoCodeId           String?
+  promoCode             Promotion?         @relation(fields: [promoCodeId], references: [id])
+  discountAmount        Decimal            @default(0) @db.Decimal(10, 2)
+  paymentMethod         PaymentMethod      @default(CASH)
+  paymentStatus         PaymentStatus      @default(PENDING)
+  paymentId             String?
+  customerRating        Int?               @db.SmallInt
+  driverRating          Int?               @db.SmallInt
+  customerReview        String?            @db.Text
+  driverReview          String?            @db.Text
+  cancellationReason    String?            @db.Text
+  cancelledBy           CancelledBy?
+  cancelledAt           DateTime?
+  cancellationCharge    Decimal            @default(0) @db.Decimal(10, 2)
+  routePolyline         String?            @db.Text
+  actualRoutePolyline   String?            @db.Text
+  matchAttempts         Int                @default(0)
+  rejectedDriverIds     String[]           @default([])
+  matchScore            Float?
+  driverDistance        Float?
+  driverETA             Int?
+  currentETA            Int?
+  tripRecordingUrl      String?            @db.Text
+  otp                   String?            @db.VarChar(6)
+  shareToken            String?            @unique
+  requireExperienced    Boolean            @default(false)
+  experiencedDriverFee  Decimal            @default(0) @db.Decimal(10, 2)
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  locations             Location[]
+  payments              Payment[]
+  walletTransactions    WalletTransaction[]
+  tips                  Tip[]
+  invoice               Invoice?
+  promotionRedemptions  PromotionRedemption[]
+  rating                Rating?
+  supportTickets        SupportTicket[]
+  emergencies           Emergency[]
+  driverRefund          DriverRefund?
+
+  @@index([customerId])
+  @@index([driverId])
+  @@index([status])
+  @@index([status, createdAt])
+  @@index([bookingType])
+  @@index([scheduledTime])
+  @@index([createdAt])
+  @@index([pickupLocationLat, pickupLocationLng])
+  @@map("bookings")
+}
+
+model DriverRefund {
+  id         String            @id @default(uuid())
+  bookingId  String            @unique
+  booking    Booking           @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  driverId   String
+  driver     DriverProfile     @relation(fields: [driverId], references: [userId])
+  upiId      String            @db.VarChar(100)
+  amount     Decimal           @default(30) @db.Decimal(10, 2)
+  status     DriverRefundStatus @default(PENDING)
+  createdAt  DateTime          @default(now())
+  paidAt     DateTime?
+
+  @@index([driverId])
+  @@index([status, createdAt])
+  @@map("driver_refunds")
+}
+
+model Location {
+  id                String             @id @default(uuid())
+  bookingId         String
+  booking           Booking            @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  driverId          String
+  driver            DriverProfile      @relation(fields: [driverId], references: [userId])
+  locationLat       Decimal            @db.Decimal(10, 8)
+  locationLng       Decimal            @db.Decimal(11, 8)
+  speed             Decimal?           @db.Decimal(6, 2)
+  heading           Decimal?           @db.Decimal(6, 2)
+  accuracy          Decimal?           @db.Decimal(6, 2)
+  altitude          Float?
+  batteryLevel      Int?               @db.SmallInt
+  timestamp         DateTime           @default(now())
+
+  @@index([bookingId])
+  @@index([driverId])
+  @@index([driverId, timestamp])
+  @@index([timestamp])
+  @@map("locations")
+}
+
+model Payment {
+  id                    String             @id @default(uuid())
+  bookingId             String?
+  booking               Booking?           @relation(fields: [bookingId], references: [id])
+  userId                String
+  user                  User               @relation(fields: [userId], references: [id])
+  amount                Decimal            @db.Decimal(10, 2)
+  paymentMethod         PaymentMethod
+  gatewayTransactionId  String?            @db.VarChar(255)
+  gatewayResponse       Json?
+  status                PaymentStatus      @default(PENDING)
+  refundAmount          Decimal            @default(0) @db.Decimal(10, 2)
+  refundReason          String?            @db.Text
+  refundedAt            DateTime?
+  createdAt             DateTime           @default(now())
+  processedAt           DateTime?
+
+  walletTransactions    WalletTransaction[]
+  membershipPurchases   MembershipPurchase[]
+  tips                  Tip[]
+  driverSubscription    DriverSubscription?
+
+  @@index([bookingId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+model WalletTransaction {
+  id            String                  @id @default(uuid())
+  userId        String
+  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type          WalletTransactionType
+  reason        WalletTransactionReason
+  status        WalletTransactionStatus @default(PENDING)
+  amount        Decimal                 @db.Decimal(10, 2)
+  balanceAfter  Decimal                 @db.Decimal(10, 2)
+  bookingId     String?
+  booking       Booking?                @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  paymentId     String?
+  payment       Payment?                @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  meta          Json?
+  createdAt     DateTime                @default(now())
+
+  @@index([userId])
+  @@index([bookingId])
+  @@index([paymentId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("wallet_transactions")
+}
+
+model MembershipPlan {
+  id            String         @id @default(uuid())
+  type          MembershipType @unique
+  title         String         @db.VarChar(100)
+  description   String?        @db.Text
+  price         Decimal        @db.Decimal(10, 2)
+  durationDays  Int
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  purchases     MembershipPurchase[]
+
+  @@index([isActive])
+  @@map("membership_plans")
+}
+
+model DriverSubscription {
+  id            String             @id @default(uuid())
+  driverId      String             @unique
+  driver        DriverProfile      @relation(fields: [driverId], references: [userId], onDelete: Cascade)
+  status        SubscriptionStatus @default(INACTIVE)
+  planPrice     Decimal            @db.Decimal(10, 2) @default(500)
+  validUntil    DateTime?
+  lastPaymentId String?            @unique
+  payment       Payment?           @relation(fields: [lastPaymentId], references: [id])
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@map("driver_subscriptions")
+}
+
+model MembershipPurchase {
+  id            String                   @id @default(uuid())
+  userId        String
+  user          User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planId        String
+  plan          MembershipPlan           @relation(fields: [planId], references: [id])
+  status        MembershipPurchaseStatus @default(PENDING)
+  startsAt      DateTime
+  endsAt        DateTime
+  paymentId     String?
+  payment       Payment?                 @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+
+  @@index([userId])
+  @@index([planId])
+  @@index([status])
+  @@index([endsAt])
+  @@map("membership_purchases")
+}
+
+model Tip {
+  id            String      @id @default(uuid())
+  bookingId     String
+  booking       Booking     @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  customerId    String
+  customer      User        @relation("TipsGiven", fields: [customerId], references: [id])
+  driverId      String
+  driver        User        @relation("TipsReceived", fields: [driverId], references: [id])
+  amount        Decimal     @db.Decimal(10, 2)
+  paymentMethod PaymentMethod
+  status        TipStatus   @default(PENDING)
+  paymentId     String?
+  payment       Payment?    @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  createdAt     DateTime    @default(now())
+  processedAt   DateTime?
+
+  @@index([bookingId])
+  @@index([customerId])
+  @@index([driverId])
+  @@index([status])
+  @@map("tips")
+}
+
+model Invoice {
+  id            String        @id @default(uuid())
+  bookingId     String        @unique
+  booking       Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  invoiceNumber String        @unique @db.VarChar(50)
+  status        InvoiceStatus @default(GENERATED)
+  amount        Decimal       @db.Decimal(10, 2)
+  currency      String        @default("INR") @db.VarChar(10)
+  s3Key         String?       @db.Text
+  pdfUrl        String?       @db.Text
+  meta          Json?
+  createdAt     DateTime      @default(now())
+
+  @@index([bookingId])
+  @@index([invoiceNumber])
+  @@index([createdAt])
+  @@map("invoices")
+}
+
+
+model Promotion {
+  id                String             @id @default(uuid())
+  code              String             @unique @db.VarChar(50)
+  type              PromotionType
+  value             Decimal            @db.Decimal(10, 2)
+  maxDiscount       Decimal?           @db.Decimal(10, 2)
+  minOrderValue     Decimal            @default(0) @db.Decimal(10, 2)
+  usageLimitPerUser Int                @default(1)
+  totalUsageLimit   Int?
+  currentUsageCount Int                @default(0)
+  validFrom         DateTime
+  validUntil        DateTime
+  applicableFor     UserType           @default(CUSTOMER)
+  description       String?            @db.Text
+  termsConditions   String?            @db.Text
+  isActive          Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  bookings          Booking[]
+  redemptions       PromotionRedemption[]
+
+  @@index([code])
+  @@index([isActive])
+  @@index([validFrom, validUntil])
+  @@map("promotions")
+}
+
+model PromotionRedemption {
+  id            String     @id @default(uuid())
+  promotionId   String
+  promotion     Promotion  @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookingId     String?
+  booking       Booking?   @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  discountAmount Decimal   @db.Decimal(10, 2)
+  redeemedAt    DateTime   @default(now())
+
+  @@unique([promotionId, userId, bookingId])
+  @@index([promotionId])
+  @@index([userId])
+  @@index([bookingId])
+  @@index([redeemedAt])
+  @@map("promotion_redemptions")
+}
+
+model Rating {
+  id                String             @id @default(uuid())
+  bookingId         String             @unique
+  booking           Booking            @relation(fields: [bookingId], references: [id])
+  ratedById         String
+  ratedBy           User               @relation("RatingGiven", fields: [ratedById], references: [id])
+  ratedUserId       String
+  ratedUser         User               @relation("RatingReceived", fields: [ratedUserId], references: [id])
+  rating            Int                @db.SmallInt
+  review            String?            @db.Text
+  categories        Json?
+  isPublic          Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+
+  @@index([bookingId])
+  @@index([ratedById])
+  @@index([ratedUserId])
+  @@index([rating])
+  @@map("ratings")
+}
+
+model SupportTicket {
+  id                String             @id @default(uuid())
+  ticketNumber      String             @unique @default(cuid())
+  userId            String
+  user              User               @relation(fields: [userId], references: [id])
+  bookingId         String?
+  booking           Booking?           @relation(fields: [bookingId], references: [id])
+  category          TicketCategory
+  priority          TicketPriority     @default(MEDIUM)
+  subject           String             @db.VarChar(255)
+  description       String             @db.Text
+  status            TicketStatus       @default(OPEN)
+  assignedTo        String?
+  attachments       Json[]             @default([])
+  resolution        String?            @db.Text
+  internalNotes     String?            @db.Text
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  resolvedAt        DateTime?
+
+  @@index([userId])
+  @@index([bookingId])
+  @@index([status])
+  @@index([priority])
+  @@index([createdAt])
+  @@map("support_tickets")
+}
+
+model Notification {
+  id                String             @id @default(uuid())
+  userId            String
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              NotificationType
+  title             String             @db.VarChar(255)
+  body              String             @db.Text
+  data              Json?
+  imageUrl          String?            @db.Text
+  isRead            Boolean            @default(false)
+  readAt            DateTime?
+  createdAt         DateTime           @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model ExpoPushToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique @db.VarChar(255)
+  platform  String?  @db.VarChar(20)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([isActive])
+  @@map("expo_push_tokens")
+}
+
+model Insurance {
+  id                String             @id @default(uuid())
+  userId            String
+  user              User               @relation(fields: [userId], references: [id])
+  bookingId         String?
+  policyType        InsuranceType
+  policyNumber      String             @unique @db.VarChar(100)
+  provider          String             @db.VarChar(100)
+  coverageAmount    Decimal            @db.Decimal(10, 2)
+  premium           Decimal            @db.Decimal(10, 2)
+  validFrom         DateTime
+  validUntil        DateTime
+  status            String             @default("ACTIVE") @db.VarChar(50)
+  claimAmount       Decimal?           @db.Decimal(10, 2)
+  claimStatus       String?            @db.VarChar(50)
+  claimDate         DateTime?
+  policyDocument    String?            @db.Text
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([userId])
+  @@index([policyNumber])
+  @@index([status])
+  @@map("insurances")
+}
+
+
+model ReferralCode {
+  id                    String             @id @default(uuid())
+  code                  String             @unique @db.VarChar(20)
+  ownerId               String             @unique
+  owner                 User               @relation("ReferralOwner", fields: [ownerId], references: [id])
+  ownerType             UserType
+  referredUsers         User[]             @relation("ReferredUsers")
+  usageCount            Int                @default(0)
+  rewardAmount          Decimal            @db.Decimal(10, 2)
+  referrerReward        Decimal            @db.Decimal(10, 2)
+  refereeReward         Decimal            @db.Decimal(10, 2)
+  totalRewardsEarned    Decimal            @default(0) @db.Decimal(10, 2)
+  isActive              Boolean            @default(true)
+  expiryDate            DateTime?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  @@index([code])
+  @@index([ownerId])
+  @@index([isActive])
+  @@map("referral_codes")
+}
+
+model Vehicle {
+  id                    String             @id @default(uuid())
+  registrationNumber    String             @unique @db.VarChar(20)
+  make                  String             @db.VarChar(100)
+  model                 String             @db.VarChar(100)
+  year                  Int
+  vehicleType           VehicleType
+  color                 String             @db.VarChar(50)
+  images                String[]           @default([])
+  insurancePolicyNumber String?            @db.VarChar(100)
+  insuranceExpiryDate   DateTime?
+  pucCertificate        String?            @db.VarChar(100)
+  pucExpiryDate         DateTime?
+  fitnessExpiryDate     DateTime?
+  currentDriverId       String?            @unique
+  currentDriver         DriverProfile?     @relation("CurrentDriver")
+  status                VehicleStatus      @default(AVAILABLE)
+  maintenanceHistory    Json[]             @default([])
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  @@index([registrationNumber])
+  @@index([status])
+  @@map("vehicles")
+}
+
+model Emergency {
+  id                String             @id @default(uuid())
+  bookingId         String
+  booking           Booking            @relation(fields: [bookingId], references: [id])
+  triggeredById     String
+  triggeredBy       User               @relation(fields: [triggeredById], references: [id])
+  locationLat       Decimal            @db.Decimal(10, 8)
+  locationLng       Decimal            @db.Decimal(11, 8)
+  status            EmergencyStatus    @default(ACTIVE)
+  responders        Json[]             @default([])
+  resolution        String?            @db.Text
+  contactedAuthorities Boolean         @default(false)
+  policeNotified    Boolean            @default(false)
+  timestamp         DateTime           @default(now())
+  resolvedAt        DateTime?
+
+  @@index([bookingId])
+  @@index([triggeredById])
+  @@index([status])
+  @@index([timestamp])
+  @@map("emergencies")
+}
+
+model Corporate {
+  id                String             @id @default(uuid())
+  name              String             @db.VarChar(255)
+  email             String             @unique @db.VarChar(255)
+  phone             String             @db.VarChar(15)
+  address           String             @db.Text
+  gstNumber         String?            @db.VarChar(20)
+  contactPerson     String             @db.VarChar(100)
+  contractStartDate DateTime
+  contractEndDate   DateTime?
+  creditLimit       Decimal            @db.Decimal(12, 2)
+  usedCredit        Decimal            @default(0) @db.Decimal(12, 2)
+  isActive          Boolean            @default(true)
+  billingCycle      String             @default("MONTHLY") @db.VarChar(20)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  customers         CustomerProfile[]
+
+  @@index([email])
+  @@index([isActive])
+  @@map("corporates")
+}
+
+model Session {
+  id                String             @id @default(uuid())
+  userId            String
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshToken      String             @unique @db.Text
+  deviceInfo        Json?
+  ipAddress         String?            @db.VarChar(45)
+  userAgent         String?            @db.Text
+  isValid           Boolean            @default(true)
+  expiresAt         DateTime
+  createdAt         DateTime           @default(now())
+  lastUsedAt        DateTime           @default(now())
+
+  @@index([userId])
+  @@index([refreshToken])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model OtpVerification {
+  id                String             @id @default(uuid())
+  userId            String?
+  user              User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  phoneNumber       String             @db.VarChar(15)
+  otp               String             @db.VarChar(6)
+  attempts          Int                @default(0)
+  isVerified        Boolean            @default(false)
+  expiresAt         DateTime
+  createdAt         DateTime           @default(now())
+  verifiedAt        DateTime?
+
+  @@index([phoneNumber])
+  @@index([expiresAt])
+  @@map("otp_verifications")
+}
+
+model AdminUser {
+  id                String             @id @default(uuid())
+  email             String             @unique @db.VarChar(255)
+  password          String             @db.VarChar(255)
+  firstName         String             @db.VarChar(100)
+  lastName          String             @db.VarChar(100)
+  role              String             @default("ADMIN") @db.VarChar(50)
+  permissions       String[]           @default([])
+  isActive          Boolean            @default(true)
+  lastLoginAt       DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([email])
+  @@map("admin_users")
+}
+
+model AppConfig {
+  id                String             @id @default(uuid())
+  key               String             @unique @db.VarChar(100)
+  value             Json
+  description       String?            @db.Text
+  isActive          Boolean            @default(true)
+  updatedAt         DateTime           @updatedAt
+  updatedBy         String?            @db.VarChar(100)
+
+  @@index([key])
+  @@map("app_configs")
+}
+
+// ── Phase 2: Referral System ────────────────────────────────────────
+
+enum ReferralStatus {
+  PENDING
+  COMPLETED
+  EXPIRED
+  REWARDED
+}
+
+model Referral {
+  id                String         @id @default(uuid())
+  referrerUserId    String
+  referrerUser      User           @relation("ReferrerReferrals", fields: [referrerUserId], references: [id])
+  referredUserId    String?
+  referredUser      User?          @relation("ReferredReferrals", fields: [referredUserId], references: [id])
+  referralCode      String         @unique @db.VarChar(20)
+  referralType      String         @db.VarChar(20) // DRIVER or CUSTOMER
+  status            ReferralStatus @default(PENDING)
+  rewardAmount      Decimal        @default(0) @db.Decimal(10, 2)
+  referredReward    Decimal        @default(0) @db.Decimal(10, 2)
+  referredPhone     String?        @db.VarChar(20)
+  completedAt       DateTime?
+  expiresAt         DateTime?
+  createdAt         DateTime       @default(now())
+
+  @@index([referrerUserId])
+  @@index([referralCode])
+  @@index([status])
+  @@map("referrals")
+}
+
+// ── Phase 2: Driver Incentive Engine ────────────────────────────────
+
+enum IncentivePeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+model DriverIncentive {
+  id                String           @id @default(uuid())
+  name              String           @db.VarChar(100)
+  description       String?          @db.Text
+  period            IncentivePeriod  @default(DAILY)
+  requiredRides     Int
+  bonusAmount       Decimal          @db.Decimal(10, 2)
+  isActive          Boolean          @default(true)
+  validFrom         DateTime?
+  validUntil        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  progress          DriverIncentiveProgress[]
+
+  @@index([isActive, period])
+  @@map("driver_incentives")
+}
+
+model DriverIncentiveProgress {
+  id                String           @id @default(uuid())
+  driverId          String
+  driver            User             @relation(fields: [driverId], references: [id])
+  incentiveId       String
+  incentive         DriverIncentive  @relation(fields: [incentiveId], references: [id])
+  periodStart       DateTime
+  periodEnd         DateTime
+  completedRides    Int              @default(0)
+  isCompleted       Boolean          @default(false)
+  bonusPaid         Boolean          @default(false)
+  paidAt            DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@unique([driverId, incentiveId, periodStart])
+  @@index([driverId, isCompleted])
+  @@map("driver_incentive_progress")
+}
+
+// ── Phase 2: Flexible Payouts ───────────────────────────────────────
+
+enum PayoutFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+model DriverPayout {
+  id                String          @id @default(uuid())
+  driverId          String
+  driver            User            @relation(fields: [driverId], references: [id])
+  amount            Decimal         @db.Decimal(10, 2)
+  frequency         PayoutFrequency
+  periodStart       DateTime
+  periodEnd         DateTime
+  status            PayoutStatus    @default(PENDING)
+  upiId             String?         @db.VarChar(100)
+  bankAccountId     String?         @db.VarChar(100)
+  transactionRef    String?         @db.VarChar(200)
+  processedAt       DateTime?
+  failureReason     String?         @db.Text
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([driverId, status])
+  @@index([status, createdAt])
+  @@map("driver_payouts")
+}
+
+// ── Phase 3: Rewards / Coins System ─────────────────────────────────
+
+enum CoinTransactionType {
+  EARNED
+  SPENT
+  EXPIRED
+  BONUS
+}
+
+model RewardsCoin {
+  id                String               @id @default(uuid())
+  userId            String
+  user              User                 @relation(fields: [userId], references: [id])
+  amount            Int
+  type              CoinTransactionType
+  reason            String               @db.VarChar(200)
+  bookingId         String?
+  expiresAt         DateTime?
+  balanceAfter      Int                  @default(0)
+  createdAt         DateTime             @default(now())
+
+  @@index([userId, type])
+  @@index([userId, createdAt])
+  @@map("rewards_coins")
+}
+
