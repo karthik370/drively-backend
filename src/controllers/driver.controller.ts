@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import path from 'path';
 import prisma from '../config/database';
@@ -36,10 +36,10 @@ export class DriverController {
       throw new AppError('Not authenticated', 401);
     }
 
-    const bucket = String(process.env.S3_BUCKET || process.env.RAILWAY_BUCKET_NAME || 'drivemate').trim();
+    const bucket = String(process.env.S3_BUCKET || process.env.RAILWAY_BUCKET_NAME || process.env.AWS_BUCKET_NAME || process.env.BUCKET_NAME || process.env.BUCKET || 'drivemate').trim();
 
-    const region = String(process.env.S3_REGION || process.env.RAILWAY_BUCKET_REGION || 'ap-south-1').trim();
-    const endpoint = String(process.env.S3_ENDPOINT || process.env.RAILWAY_BUCKET_ENDPOINT || process.env.RAILWAY_BUCKET_URL_PUB || '').trim();
+    const region = String(process.env.S3_REGION || process.env.RAILWAY_BUCKET_REGION || process.env.AWS_REGION || process.env.REGION || 'ap-south-1').trim();
+    const endpoint = String(process.env.S3_ENDPOINT || process.env.RAILWAY_BUCKET_ENDPOINT || process.env.AWS_S3_ENDPOINT || process.env.ENDPOINT || process.env.RAILWAY_BUCKET_URL_PUB || '').trim();
 
     if (!bucket) {
       throw new AppError('Bucket credentials are not configured', 500);
@@ -55,7 +55,7 @@ export class DriverController {
       throw new AppError('fileName is required', 400);
     }
 
-    const allowedKinds = new Set(['driver-selfie', 'driver-license', 'driver-aadhaar', 'driver-pan']);
+    const allowedKinds = new Set(['driver-selfie', 'driver-license', 'driver-aadhaar', 'driver-pan', 'profile-image', 'customer-profile']);
     if (!kind || !allowedKinds.has(kind)) {
       throw new AppError('Invalid kind', 400);
     }
@@ -79,8 +79,8 @@ export class DriverController {
       endpoint: endpoint ? endpoint : undefined,
       forcePathStyle: !!endpoint, // Crucial for S3-compatible like Railway, false for standard AWS S3
       credentials: {
-        accessKeyId: String(process.env.S3_ACCESS_KEY_ID || process.env.RAILWAY_BUCKET_ACCESS_KEY_ID || '').trim(),
-        secretAccessKey: String(process.env.S3_SECRET_ACCESS_KEY || process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY || '').trim()
+        accessKeyId: String(process.env.S3_ACCESS_KEY_ID || process.env.RAILWAY_BUCKET_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || process.env.ACCESS_KEY_ID || '').trim(),
+        secretAccessKey: String(process.env.S3_SECRET_ACCESS_KEY || process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || process.env.SECRET_ACCESS_KEY || '').trim()
       }
     });
 
@@ -92,17 +92,10 @@ export class DriverController {
 
     const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 5 });
 
-    let fileUrl = '';
-    const publicUrlBase = String(process.env.RAILWAY_BUCKET_PUBLIC_URL || process.env.CLOUDFRONT_BASE_URL || endpoint || `https://${bucket}.s3.${region}.custom-domain.com`).replace(/\/$/, '');
-
-    // If it's a raw S3-compatible endpoint, we append the bucket name manually in path style
-    if (publicUrlBase === endpoint && endpoint.includes('railway')) {
-      fileUrl = `${publicUrlBase}/${bucket}/${key}`;
-    } else if (publicUrlBase !== endpoint) {
-      fileUrl = `${publicUrlBase}/${key}`;
-    } else {
-      fileUrl = `${publicUrlBase}/${key}`;
-    }
+    // Use the backend proxy for file downloads because Railway S3 prohibits direct public linking.
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const apiVersion = process.env.API_VERSION || 'v1';
+    const fileUrl = `${baseUrl}/api/${apiVersion}/drivers/${key}`;
 
     logger.info('presignUpload generated for Storage', {
       bucket,
@@ -117,6 +110,52 @@ export class DriverController {
         fileUrl,
       },
     });
+  });
+
+  static downloadImage = asyncHandler(async (req: AuthRequest, res: Response) => {
+    // We expect the generic param 'key' to be the rest of the path, e.g. /api/v1/drivers/uploads/<key>
+    const key = req.params[0] || req.params.key;
+    if (!key) {
+      throw new AppError('File key is required', 400);
+    }
+
+    const bucket = String(process.env.S3_BUCKET || process.env.RAILWAY_BUCKET_NAME || process.env.AWS_BUCKET_NAME || process.env.BUCKET_NAME || process.env.BUCKET || 'drivemate').trim();
+    const region = String(process.env.S3_REGION || process.env.RAILWAY_BUCKET_REGION || process.env.AWS_REGION || process.env.REGION || 'ap-south-1').trim();
+    const endpoint = String(process.env.S3_ENDPOINT || process.env.RAILWAY_BUCKET_ENDPOINT || process.env.AWS_S3_ENDPOINT || process.env.ENDPOINT || process.env.RAILWAY_BUCKET_URL_PUB || '').trim();
+
+    const s3 = new S3Client({
+      region,
+      endpoint: endpoint ? endpoint : undefined,
+      forcePathStyle: !!endpoint,
+      credentials: {
+        accessKeyId: String(process.env.S3_ACCESS_KEY_ID || process.env.RAILWAY_BUCKET_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || process.env.ACCESS_KEY_ID || '').trim(),
+        secretAccessKey: String(process.env.S3_SECRET_ACCESS_KEY || process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || process.env.SECRET_ACCESS_KEY || '').trim()
+      }
+    });
+
+    const command = new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    });
+
+    try {
+      const s3Item = await s3.send(command);
+
+      const contentType = s3Item.ContentType || 'application/octet-stream';
+      res.setHeader('Content-Type', contentType);
+
+      if (s3Item.ContentLength) {
+        res.setHeader('Content-Length', s3Item.ContentLength);
+      }
+
+      // AWS SDK v3 returns Body as a stream in Node.js
+      const bodyStream = s3Item.Body as NodeJS.ReadableStream;
+      bodyStream.pipe(res);
+    } catch (e: any) {
+      logger.error('Failed to download image from Bucket', { key, error: e.message });
+      // If the file doesn't exist or we hit a 403, return 404
+      res.status(404).json({ success: false, message: 'Image not found' });
+    }
   });
 
   static goOnline = asyncHandler(async (req: AuthRequest, res: Response) => {
