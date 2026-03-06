@@ -25,13 +25,13 @@ const logger = winston.createLogger({
   format: logFormat,
   defaultMeta: { service: 'drivemate-api' },
   transports: [
-    new winston.transports.File({ 
-      filename: path.join('logs', 'error.log'), 
+    new winston.transports.File({
+      filename: path.join('logs', 'error.log'),
       level: 'error',
       maxsize: 5242880,
       maxFiles: 5,
     }),
-    new winston.transports.File({ 
+    new winston.transports.File({
       filename: path.join('logs', 'combined.log'),
       maxsize: 5242880,
       maxFiles: 5,
@@ -39,10 +39,9 @@ const logger = winston.createLogger({
   ],
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  logger.add(new winston.transports.Console({
-    format: consoleFormat,
-  }));
-}
+// We ALWAYS want to print to console in Docker/Railway
+logger.add(new winston.transports.Console({
+  format: consoleFormat,
+}));
 
 export { logger };
