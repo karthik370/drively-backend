@@ -221,8 +221,9 @@ const startServer = async () => {
         const host = String(process.env.REDIS_HOST || 'localhost').trim();
         const port = Number(process.env.REDIS_PORT || 6379);
         const password = process.env.REDIS_PASSWORD || undefined;
+        const rawSocketUrl = process.env.SOCKET_REDIS_URL?.trim();
         const url =
-          (typeof process.env.SOCKET_REDIS_URL === 'string' && process.env.SOCKET_REDIS_URL.trim()) ||
+          (rawSocketUrl && rawSocketUrl !== '${REDIS_URL}' ? rawSocketUrl : undefined) ||
           (typeof process.env.REDIS_URL === 'string' && process.env.REDIS_URL.trim()) ||
           `redis://${host}:${port}`;
 
