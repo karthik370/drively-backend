@@ -42,39 +42,44 @@ const MAX_FILE_BYTES = 6 * 1024 * 1024; // 6 MB raw
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class DriverController {
-  // POST /uploads/image — accepts { base64, kind, fileName, mimeType } as JSON
   static uploadImage = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       throw new AppError('Not authenticated', 401);
     }
 
-    const { base64, kind, mimeType } = req.body || {};
+    // Native multipart uploads put formData fields in req.body and the binary file in req.file
+    const { kind } = req.body || {};
+    const file = req.file;
 
-    if (!base64 || typeof base64 !== 'string') {
-      throw new AppError('base64 image data is required', 400);
+    if (!file) {
+      throw new AppError('File image data is required', 400);
     }
     if (!kind || !allowedKinds.has(kind)) {
       throw new AppError('Invalid kind', 400);
     }
+
+    const mimeType = file.mimetype;
     if (!mimeType || !allowedMimeTypes.has(mimeType)) {
       throw new AppError('Invalid mimeType', 400);
-    }
-
-    const approxSize = Math.ceil(base64.length * 0.75);
-    if (approxSize > MAX_FILE_BYTES) {
-      throw new AppError('File too large (max 6 MB)', 413);
     }
 
     const folder = `drivemate/${req.user.id}/${kind}`;
     const publicId = `${Date.now()}-${uuidv4()}`;
 
-    logger.info('Uploading image to Cloudinary...', { folder, publicId, approxSize, mime: mimeType });
+    logger.info('Uploading binary image stream to Cloudinary...', { folder, publicId, size: file.size, mime: mimeType });
 
     try {
-      const result = await cloudinary.uploader.upload(
-        `data:${mimeType};base64,${base64}`,
-        { folder, public_id: publicId, resource_type: 'image', overwrite: true }
-      );
+      // Use upload_stream for buffers instead of data URI strings
+      const result: any = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          { folder, public_id: publicId, resource_type: 'image', overwrite: true },
+          (error, result) => {
+            if (error) return reject(error);
+            resolve(result);
+          }
+        );
+        uploadStream.end(file.buffer);
+      });
 
       logger.info('Cloudinary upload successful', { folder, publicId, url: result.secure_url });
 
@@ -83,7 +88,7 @@ export class DriverController {
         data: { key: result.public_id, fileUrl: result.secure_url },
       });
     } catch (err: any) {
-      logger.error('Cloudinary upload failed', { folder, publicId, error: err?.message });
+      logger.error('Cloudinary stream upload failed', { folder, publicId, error: err?.message });
       throw new AppError('Failed to store image', 502);
     }
   });
