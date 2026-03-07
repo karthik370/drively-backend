@@ -211,6 +211,9 @@ const startServer = async () => {
       logger.info(`🌍 Environment: ${process.env.NODE_ENV}`);
       logger.info('🧩 Runtime identity', { hostname: os.hostname() });
     });
+    // Increase timeouts for slow mobile uploads
+    httpServer.headersTimeout = 120000;
+    httpServer.requestTimeout = 300000;
 
     const enableSocketRedisAdapter =
       String(process.env.SOCKET_REDIS_ADAPTER_ENABLED || '').trim() === 'true' ||
