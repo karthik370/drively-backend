@@ -1,6 +1,5 @@
 import { Response } from 'express';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import multer from 'multer';
 import path from 'path';
 import prisma from '../config/database';
 import { AuthRequest } from '../middleware/auth';
@@ -57,55 +56,52 @@ function getS3Client() {
     requestChecksumCalculation: 'WHEN_REQUIRED' as any,
   });
 }
-// ─── Multer (memory) + manual S3 upload ──────────────────────────────────────
+// ─── Upload config ───────────────────────────────────────────────────────────
 const allowedKinds = new Set(['driver-selfie', 'driver-license', 'driver-aadhaar', 'driver-pan', 'profile-image', 'customer-profile']);
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
-
-export const multerUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 6 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (allowedMimeTypes.has(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only JPEG, PNG, and WebP images are allowed'));
-    }
-  },
-});
+const MAX_FILE_BYTES = 6 * 1024 * 1024; // 6 MB raw
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class DriverController {
-  // POST /uploads/image — receives multipart file, uploads buffer to S3
+  // POST /uploads/image — accepts { base64, kind, fileName, mimeType } as JSON
   static uploadImage = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       throw new AppError('Not authenticated', 401);
     }
 
-    const file = req.file;
-    if (!file || !file.buffer) {
-      throw new AppError('No image file provided', 400);
-    }
+    const { base64, kind, fileName, mimeType } = req.body || {};
 
-    const kind = String(req.body?.kind || '').trim();
+    if (!base64 || typeof base64 !== 'string') {
+      throw new AppError('base64 image data is required', 400);
+    }
     if (!kind || !allowedKinds.has(kind)) {
       throw new AppError('Invalid kind', 400);
     }
+    if (!mimeType || !allowedMimeTypes.has(mimeType)) {
+      throw new AppError('Invalid mimeType', 400);
+    }
 
-    const ext = path.extname(file.originalname) || '.jpg';
+    // Decode base64 → Buffer
+    const buffer = Buffer.from(base64, 'base64');
+    if (buffer.length > MAX_FILE_BYTES) {
+      throw new AppError('File too large (max 6 MB)', 413);
+    }
+
+    const ext = path.extname(String(fileName || '')) || '.jpg';
     const safeExt = ext.length <= 10 ? ext : '.jpg';
     const key = `uploads/${req.user.id}/${kind}/${Date.now()}-${uuidv4()}${safeExt}`;
 
     const { bucket } = getStorageConfig();
     const s3 = getS3Client();
 
-    logger.info('Uploading image to S3...', { bucket, key, size: file.size, mime: file.mimetype });
+    logger.info('Uploading image to S3...', { bucket, key, size: buffer.length, mime: mimeType });
 
     try {
       await s3.send(new PutObjectCommand({
         Bucket: bucket,
         Key: key,
-        Body: file.buffer,
-        ContentType: file.mimetype,
+        Body: buffer,
+        ContentType: mimeType,
       }));
     } catch (err: any) {
       logger.error('S3 upload failed', { bucket, key, error: err?.message });
@@ -116,7 +112,7 @@ export class DriverController {
     const apiVersion = process.env.API_VERSION || 'v1';
     const fileUrl = `${baseUrl}/api/${apiVersion}/drivers/uploads/${key}`;
 
-    logger.info('Image uploaded successfully', { bucket, key, size: file.size, kind });
+    logger.info('Image uploaded successfully', { bucket, key, size: buffer.length, kind });
 
     res.status(200).json({
       success: true,
