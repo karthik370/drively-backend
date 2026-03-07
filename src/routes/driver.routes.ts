@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requireDriver } from '../middleware/auth';
-import DriverController from '../controllers/driver.controller';
+import DriverController, { multerUpload } from '../controllers/driver.controller';
 
 const router = Router();
 
@@ -14,7 +14,8 @@ router.patch('/status/online', DriverController.goOnline);
 router.patch('/status/offline', DriverController.goOffline);
 
 router.get('/documents/status', DriverController.getDocumentsStatus);
-router.post('/uploads/presign', (DriverController as any).presignUpload);
+// Multipart upload — multer-s3 streams the file directly to Tigris
+router.post('/uploads/image', multerUpload.single('image'), DriverController.uploadImage as any);
 router.post('/documents/submit', DriverController.submitDocuments);
 
 router.get('/availability', DriverController.getAvailability);

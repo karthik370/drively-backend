@@ -1,6 +1,7 @@
 import { Response } from 'express';
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import multer from 'multer';
+import multerS3 from 'multer-s3';
 import path from 'path';
 import prisma from '../config/database';
 import { AuthRequest } from '../middleware/auth';
@@ -57,78 +58,60 @@ function getS3Client() {
     requestChecksumCalculation: 'WHEN_REQUIRED' as any,
   });
 }
+// ─── Multer-S3 upload middleware ─────────────────────────────────────────────
+const allowedKinds = new Set(['driver-selfie', 'driver-license', 'driver-aadhaar', 'driver-pan', 'profile-image', 'customer-profile']);
+const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+export const multerUpload = multer({
+  storage: multerS3({
+    s3: getS3Client(),
+    bucket: getStorageConfig().bucket,
+    contentType: multerS3.AUTO_CONTENT_TYPE,
+    key: (req: any, file, cb) => {
+      const userId = req.user?.id || 'anonymous';
+      const kind = String(req.body?.kind || req.query?.kind || 'upload').trim();
+      const ext = path.extname(file.originalname) || '.jpg';
+      const safeExt = ext.length <= 10 ? ext : '.jpg';
+      cb(null, `uploads/${userId}/${kind}/${Date.now()}-${uuidv4()}${safeExt}`);
+    },
+  }),
+  limits: { fileSize: 6 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (allowedMimeTypes.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JPEG, PNG, and WebP images are allowed'));
+    }
+  },
+});
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class DriverController {
-  static presignUpload = asyncHandler(async (req: AuthRequest, res: Response) => {
+  // POST /uploads/image — receives multipart file, streams to Tigris via multer-s3
+  static uploadImage = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       throw new AppError('Not authenticated', 401);
     }
 
-    const { bucket } = getStorageConfig();
-    if (!bucket) {
-      throw new AppError('Bucket credentials are not configured', 500);
+    const file = req.file as Express.MulterS3.File;
+    if (!file) {
+      throw new AppError('No image file provided', 400);
     }
 
-    const fileNameRaw = typeof (req.body as any)?.fileName === 'string' ? String((req.body as any).fileName).trim() : '';
-    const contentType = typeof (req.body as any)?.contentType === 'string' ? String((req.body as any).contentType).trim() : '';
-    const kind = typeof (req.body as any)?.kind === 'string' ? String((req.body as any).kind).trim() : '';
-    const fileSizeRaw = (req.body as any)?.fileSize;
-    const fileSize = typeof fileSizeRaw === 'number' ? fileSizeRaw : typeof fileSizeRaw === 'string' ? Number(fileSizeRaw) : NaN;
-
-    if (!fileNameRaw) {
-      throw new AppError('fileName is required', 400);
-    }
-
-    const allowedKinds = new Set(['driver-selfie', 'driver-license', 'driver-aadhaar', 'driver-pan', 'profile-image', 'customer-profile']);
+    const kind = String(req.body?.kind || '').trim();
     if (!kind || !allowedKinds.has(kind)) {
       throw new AppError('Invalid kind', 400);
     }
 
-    const allowedContentTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
-    if (!contentType || !allowedContentTypes.has(contentType)) {
-      throw new AppError('Invalid contentType', 400);
-    }
-
-    const maxBytes = Math.max(1, Number(process.env.STORAGE_MAX_UPLOAD_BYTES || '6000000'));
-    if (Number.isFinite(fileSize) && fileSize > maxBytes) {
-      throw new AppError('File too large', 413);
-    }
-
-    const ext = path.extname(fileNameRaw) || '';
-    const safeExt = ext.length <= 10 ? ext : '';
-    const key = `uploads/${req.user.id}/${kind}/${Date.now()}-${uuidv4()}${safeExt}`;
-
-    const s3 = getS3Client();
-
-    const command = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      // Do NOT set ContentType here — it gets signed into the presigned URL,
-      // but React Native's fetch() sends a slightly different value, breaking
-      // the signature. The mobile client sends Content-Type as an unsigned header.
-    });
-
-    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 5 });
-
-    // Railway Buckets are private — serve images through our own backend proxy.
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const apiVersion = process.env.API_VERSION || 'v1';
-    const fileUrl = `${baseUrl}/api/${apiVersion}/drivers/uploads/${key}`;
+    const fileUrl = `${baseUrl}/api/${apiVersion}/drivers/uploads/${file.key}`;
 
-    logger.info('presignUpload generated', {
-      bucket,
-      key,
-      uploadUrlHost: new URL(uploadUrl).host, // log which host the upload targets
-    });
+    logger.info('Image uploaded to bucket', { bucket: file.bucket, key: file.key, size: file.size, kind });
 
     res.status(200).json({
       success: true,
-      data: {
-        key,
-        uploadUrl,
-        fileUrl,
-      },
+      data: { key: file.key, fileUrl },
     });
   });
 
