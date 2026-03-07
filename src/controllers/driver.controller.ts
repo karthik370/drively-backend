@@ -103,7 +103,12 @@ export class DriverController {
       ContentType: contentType,
     });
 
-    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 5 });
+    // Sign Content-Type so the mobile app can send it as a header without
+    // Tigris rejecting the request for an unsigned header mismatch.
+    const uploadUrl = await getSignedUrl(s3, command, {
+      expiresIn: 60 * 5,
+      signableHeaders: new Set(['content-type']),
+    });
 
     // Railway Buckets are private — serve images through our own backend proxy.
     const baseUrl = `${req.protocol}://${req.get('host')}`;
