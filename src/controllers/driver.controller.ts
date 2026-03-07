@@ -104,15 +104,12 @@ export class DriverController {
     const command = new PutObjectCommand({
       Bucket: bucket,
       Key: key,
-      ContentType: contentType,
+      // Do NOT set ContentType here — it gets signed into the presigned URL,
+      // but React Native's fetch() sends a slightly different value, breaking
+      // the signature. The mobile client sends Content-Type as an unsigned header.
     });
 
-    // Sign Content-Type so the mobile app can send it as a header without
-    // Tigris rejecting the request for an unsigned header mismatch.
-    const uploadUrl = await getSignedUrl(s3, command, {
-      expiresIn: 60 * 5,
-      signableHeaders: new Set(['content-type']),
-    });
+    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 5 });
 
     // Railway Buckets are private — serve images through our own backend proxy.
     const baseUrl = `${req.protocol}://${req.get('host')}`;
