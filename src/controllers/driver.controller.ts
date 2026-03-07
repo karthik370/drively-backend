@@ -51,6 +51,10 @@ function getS3Client() {
     endpoint,
     forcePathStyle: true, // Required for S3-compatible stores like Railway/Tigris
     credentials: { accessKeyId, secretAccessKey },
+    // Disable automatic CRC32 checksum — AWS SDK v3 embeds a checksum for an
+    // empty body into presigned URLs, but the actual upload has real image data,
+    // causing Tigris to reject every request with SignatureDoesNotMatch.
+    requestChecksumCalculation: 'WHEN_REQUIRED' as any,
   });
 }
 // ─────────────────────────────────────────────────────────────────────────────
