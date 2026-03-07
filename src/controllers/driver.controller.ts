@@ -65,20 +65,25 @@ export class DriverController {
     const folder = `drivemate/${req.user.id}/${kind}`;
     const publicId = `${Date.now()}-${uuidv4()}`;
 
-    logger.info('Uploading binary image stream to Cloudinary...', { folder, publicId, size: file.size, mime: mimeType });
+    logger.info('Uploading local file to Cloudinary...', { folder, publicId, size: file.size, mime: mimeType, path: file.path });
 
     try {
-      // Use upload_stream for buffers instead of data URI strings
-      const result: any = await new Promise((resolve, reject) => {
-        const uploadStream = cloudinary.uploader.upload_stream(
-          { folder, public_id: publicId, resource_type: 'image', overwrite: true },
-          (error, result) => {
-            if (error) return reject(error);
-            resolve(result);
-          }
-        );
-        uploadStream.end(file.buffer);
+      const result = await cloudinary.uploader.upload(file.path, {
+        folder,
+        public_id: publicId,
+        resource_type: 'image',
+        overwrite: true,
       });
+
+      // Cleanup local file immediately after upload
+      const fs = require('fs');
+      try {
+        if (fs.existsSync(file.path)) {
+          fs.unlinkSync(file.path);
+        }
+      } catch (cleanupErr) {
+        logger.error('Failed to delete temporary local file', { path: file.path, error: cleanupErr });
+      }
 
       logger.info('Cloudinary upload successful', { folder, publicId, url: result.secure_url });
 
