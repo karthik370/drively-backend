@@ -5,7 +5,7 @@ import { AuthRequest } from '../middleware/auth';
 import { AppError, asyncHandler } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import { PayoutStatus, VerificationStatus } from '@prisma/client';
-import { v4 as uuidv4 } from 'uuid';
+
 
 const toNumber = (v: unknown): number => {
   const n = typeof v === 'string' ? Number(v) : typeof v === 'number' ? v : NaN;
@@ -42,57 +42,26 @@ const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 export class DriverController {
   static uploadImage = asyncHandler(async (req: AuthRequest, res: Response) => {
-    if (!req.user) {
-      throw new AppError('Not authenticated', 401);
-    }
+    if (!req.user) throw new AppError('Not authenticated', 401);
 
-    // Native multipart uploads put formData fields in req.body and the binary file in req.file
-    const { kind } = req.body || {};
-    const file = req.file;
-
-    if (!file) {
-      throw new AppError('File image data is required', 400);
-    }
-    if (!kind || !allowedKinds.has(kind)) {
-      throw new AppError('Invalid kind', 400);
-    }
-
-    const mimeType = file.mimetype;
-    if (!mimeType || !allowedMimeTypes.has(mimeType)) {
-      throw new AppError('Invalid mimeType', 400);
-    }
+    const { base64, kind, mimeType } = req.body || {};
+    if (!base64 || typeof base64 !== 'string') throw new AppError('base64 image data is required', 400);
+    if (!kind || !allowedKinds.has(kind)) throw new AppError('Invalid kind', 400);
+    if (!mimeType || !allowedMimeTypes.has(mimeType)) throw new AppError('Invalid mimeType', 400);
 
     const folder = `drivemate/${req.user.id}/${kind}`;
-    const publicId = `${Date.now()}-${uuidv4()}`;
-
-    logger.info('Uploading local file to Cloudinary...', { folder, publicId, size: file.size, mime: mimeType, path: file.path });
+    const publicId = `${Date.now()}`;
+    logger.info('Uploading base64 image to Cloudinary...', { folder, publicId, mime: mimeType });
 
     try {
-      const result = await cloudinary.uploader.upload(file.path, {
-        folder,
-        public_id: publicId,
-        resource_type: 'image',
-        overwrite: true,
-      });
-
-      // Cleanup local file immediately after upload
-      const fs = require('fs');
-      try {
-        if (fs.existsSync(file.path)) {
-          fs.unlinkSync(file.path);
-        }
-      } catch (cleanupErr) {
-        logger.error('Failed to delete temporary local file', { path: file.path, error: cleanupErr });
-      }
-
-      logger.info('Cloudinary upload successful', { folder, publicId, url: result.secure_url });
-
-      res.status(200).json({
-        success: true,
-        data: { key: result.public_id, fileUrl: result.secure_url },
-      });
+      const result = await cloudinary.uploader.upload(
+        `data:${mimeType};base64,${base64}`,
+        { folder, public_id: publicId, resource_type: 'image', overwrite: true }
+      );
+      logger.info('Cloudinary upload successful', { url: result.secure_url });
+      res.status(200).json({ success: true, data: { key: result.public_id, fileUrl: result.secure_url } });
     } catch (err: any) {
-      logger.error('Cloudinary stream upload failed', { folder, publicId, error: err?.message });
+      logger.error('Cloudinary upload failed', { error: err?.message });
       throw new AppError('Failed to store image', 502);
     }
   });
