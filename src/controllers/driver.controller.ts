@@ -38,7 +38,6 @@ cloudinary.config({
 // ─── Upload config ───────────────────────────────────────────────────────────
 const allowedKinds = new Set(['driver-selfie', 'driver-license', 'driver-aadhaar', 'driver-pan', 'profile-image', 'customer-profile']);
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const MAX_FILE_BYTES = 6 * 1024 * 1024; // 6 MB raw
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class DriverController {
