@@ -1,7 +1,6 @@
 import { Response } from 'express';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import multer from 'multer';
-import multerS3 from 'multer-s3';
 import path from 'path';
 import prisma from '../config/database';
 import { AuthRequest } from '../middleware/auth';
@@ -58,23 +57,12 @@ function getS3Client() {
     requestChecksumCalculation: 'WHEN_REQUIRED' as any,
   });
 }
-// ─── Multer-S3 upload middleware ─────────────────────────────────────────────
+// ─── Multer (memory) + manual S3 upload ──────────────────────────────────────
 const allowedKinds = new Set(['driver-selfie', 'driver-license', 'driver-aadhaar', 'driver-pan', 'profile-image', 'customer-profile']);
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 export const multerUpload = multer({
-  storage: multerS3({
-    s3: getS3Client(),
-    bucket: getStorageConfig().bucket,
-    contentType: multerS3.AUTO_CONTENT_TYPE,
-    key: (req: any, file, cb) => {
-      const userId = req.user?.id || 'anonymous';
-      const kind = String(req.body?.kind || req.query?.kind || 'upload').trim();
-      const ext = path.extname(file.originalname) || '.jpg';
-      const safeExt = ext.length <= 10 ? ext : '.jpg';
-      cb(null, `uploads/${userId}/${kind}/${Date.now()}-${uuidv4()}${safeExt}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 6 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (allowedMimeTypes.has(file.mimetype)) {
@@ -87,14 +75,14 @@ export const multerUpload = multer({
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class DriverController {
-  // POST /uploads/image — receives multipart file, streams to Tigris via multer-s3
+  // POST /uploads/image — receives multipart file, uploads buffer to S3
   static uploadImage = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       throw new AppError('Not authenticated', 401);
     }
 
-    const file = req.file as Express.MulterS3.File;
-    if (!file) {
+    const file = req.file;
+    if (!file || !file.buffer) {
       throw new AppError('No image file provided', 400);
     }
 
@@ -103,15 +91,36 @@ export class DriverController {
       throw new AppError('Invalid kind', 400);
     }
 
+    const ext = path.extname(file.originalname) || '.jpg';
+    const safeExt = ext.length <= 10 ? ext : '.jpg';
+    const key = `uploads/${req.user.id}/${kind}/${Date.now()}-${uuidv4()}${safeExt}`;
+
+    const { bucket } = getStorageConfig();
+    const s3 = getS3Client();
+
+    logger.info('Uploading image to S3...', { bucket, key, size: file.size, mime: file.mimetype });
+
+    try {
+      await s3.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+      }));
+    } catch (err: any) {
+      logger.error('S3 upload failed', { bucket, key, error: err?.message });
+      throw new AppError('Failed to store image', 502);
+    }
+
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const apiVersion = process.env.API_VERSION || 'v1';
-    const fileUrl = `${baseUrl}/api/${apiVersion}/drivers/uploads/${file.key}`;
+    const fileUrl = `${baseUrl}/api/${apiVersion}/drivers/uploads/${key}`;
 
-    logger.info('Image uploaded to bucket', { bucket: file.bucket, key: file.key, size: file.size, kind });
+    logger.info('Image uploaded successfully', { bucket, key, size: file.size, kind });
 
     res.status(200).json({
       success: true,
-      data: { key: file.key, fileUrl },
+      data: { key, fileUrl },
     });
   });
 
