@@ -1,6 +1,5 @@
 import { Response } from 'express';
-import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import path from 'path';
+import { v2 as cloudinary } from 'cloudinary';
 import prisma from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { AppError, asyncHandler } from '../middleware/errorHandler';
@@ -29,33 +28,13 @@ const hasSubmittedDocs = (p: any): boolean => {
   return Boolean(licenseOk && aadhaarOk && panOk && licenseImgOk && aadhaarImgOk && panImgOk && selfieOk);
 };
 
-// ─── Shared S3 / Railway Bucket helper ───────────────────────────────────────
-// Railway auto-injects exactly these 5 variables when a Bucket is referenced:
-//   BUCKET, ACCESS_KEY_ID, SECRET_ACCESS_KEY, ENDPOINT, REGION
-// We check Railway's names FIRST, then fall back to legacy/AWS names.
-function getStorageConfig() {
-  const bucket = String(process.env.BUCKET || process.env.RAILWAY_BUCKET_NAME || process.env.S3_BUCKET || process.env.AWS_BUCKET_NAME || process.env.BUCKET_NAME || '').trim();
-  const region = String(process.env.REGION || process.env.RAILWAY_BUCKET_REGION || process.env.S3_REGION || process.env.AWS_REGION || 'auto').trim();
-  const endpoint = String(process.env.ENDPOINT || process.env.RAILWAY_BUCKET_ENDPOINT || process.env.S3_ENDPOINT || process.env.AWS_S3_ENDPOINT || 'https://storage.railway.app').trim();
-  const accessKeyId = String(process.env.ACCESS_KEY_ID || process.env.RAILWAY_BUCKET_ACCESS_KEY_ID || process.env.S3_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || '').trim();
-  const secretAccessKey = String(process.env.SECRET_ACCESS_KEY || process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY || process.env.S3_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || '').trim();
+// ─── Cloudinary config ───────────────────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
-  return { bucket, region, endpoint, accessKeyId, secretAccessKey };
-}
-
-function getS3Client() {
-  const { region, endpoint, accessKeyId, secretAccessKey } = getStorageConfig();
-  return new S3Client({
-    region,
-    endpoint,
-    forcePathStyle: false, // Tigris requires virtual-hosted-style URLs (not path-style)
-    credentials: { accessKeyId, secretAccessKey },
-    // Disable automatic CRC32 checksum — AWS SDK v3 embeds a checksum for an
-    // empty body into presigned URLs, but the actual upload has real image data,
-    // causing Tigris to reject every request with SignatureDoesNotMatch.
-    requestChecksumCalculation: 'WHEN_REQUIRED' as any,
-  });
-}
 // ─── Upload config ───────────────────────────────────────────────────────────
 const allowedKinds = new Set(['driver-selfie', 'driver-license', 'driver-aadhaar', 'driver-pan', 'profile-image', 'customer-profile']);
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -69,7 +48,7 @@ export class DriverController {
       throw new AppError('Not authenticated', 401);
     }
 
-    const { base64, kind, fileName, mimeType } = req.body || {};
+    const { base64, kind, mimeType } = req.body || {};
 
     if (!base64 || typeof base64 !== 'string') {
       throw new AppError('base64 image data is required', 400);
@@ -81,76 +60,31 @@ export class DriverController {
       throw new AppError('Invalid mimeType', 400);
     }
 
-    // Decode base64 → Buffer
-    const buffer = Buffer.from(base64, 'base64');
-    if (buffer.length > MAX_FILE_BYTES) {
+    const approxSize = Math.ceil(base64.length * 0.75);
+    if (approxSize > MAX_FILE_BYTES) {
       throw new AppError('File too large (max 6 MB)', 413);
     }
 
-    const ext = path.extname(String(fileName || '')) || '.jpg';
-    const safeExt = ext.length <= 10 ? ext : '.jpg';
-    const key = `uploads/${req.user.id}/${kind}/${Date.now()}-${uuidv4()}${safeExt}`;
+    const folder = `drivemate/${req.user.id}/${kind}`;
+    const publicId = `${Date.now()}-${uuidv4()}`;
 
-    const { bucket } = getStorageConfig();
-    const s3 = getS3Client();
-
-    logger.info('Uploading image to S3...', { bucket, key, size: buffer.length, mime: mimeType });
+    logger.info('Uploading image to Cloudinary...', { folder, publicId, approxSize, mime: mimeType });
 
     try {
-      await s3.send(new PutObjectCommand({
-        Bucket: bucket,
-        Key: key,
-        Body: buffer,
-        ContentType: mimeType,
-      }));
+      const result = await cloudinary.uploader.upload(
+        `data:${mimeType};base64,${base64}`,
+        { folder, public_id: publicId, resource_type: 'image', overwrite: true }
+      );
+
+      logger.info('Cloudinary upload successful', { folder, publicId, url: result.secure_url });
+
+      res.status(200).json({
+        success: true,
+        data: { key: result.public_id, fileUrl: result.secure_url },
+      });
     } catch (err: any) {
-      logger.error('S3 upload failed', { bucket, key, error: err?.message });
+      logger.error('Cloudinary upload failed', { folder, publicId, error: err?.message });
       throw new AppError('Failed to store image', 502);
-    }
-
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const apiVersion = process.env.API_VERSION || 'v1';
-    const fileUrl = `${baseUrl}/api/${apiVersion}/drivers/uploads/${key}`;
-
-    logger.info('Image uploaded successfully', { bucket, key, size: buffer.length, kind });
-
-    res.status(200).json({
-      success: true,
-      data: { key, fileUrl },
-    });
-  });
-
-  static downloadImage = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const key = req.params[0] || req.params.key;
-    if (!key) {
-      throw new AppError('File key is required', 400);
-    }
-
-    const { bucket } = getStorageConfig();
-    const s3 = getS3Client();
-
-    const command = new GetObjectCommand({
-      Bucket: bucket,
-      Key: key,
-    });
-
-    try {
-      const s3Item = await s3.send(command);
-
-      const contentType = s3Item.ContentType || 'application/octet-stream';
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Cache-Control', 'public, max-age=86400'); // cache images for 24h
-
-      if (s3Item.ContentLength) {
-        res.setHeader('Content-Length', s3Item.ContentLength);
-      }
-
-      // AWS SDK v3 returns Body as a Readable stream in Node.js
-      const bodyStream = s3Item.Body as NodeJS.ReadableStream;
-      bodyStream.pipe(res);
-    } catch (e: any) {
-      logger.error('Failed to download image from Bucket', { key, bucket, error: e.message });
-      res.status(404).json({ success: false, message: 'Image not found' });
     }
   });
 

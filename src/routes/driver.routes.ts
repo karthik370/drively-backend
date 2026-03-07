@@ -4,9 +4,6 @@ import DriverController from '../controllers/driver.controller';
 
 const router = Router();
 
-// Public route to view images (bypasses auth so the mobile app's Image component can easily load them)
-router.get('/uploads/*', DriverController.downloadImage);
-
 router.use(authenticate);
 router.use(requireDriver);
 
