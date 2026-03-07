@@ -49,7 +49,7 @@ function getS3Client() {
   return new S3Client({
     region,
     endpoint,
-    forcePathStyle: true, // Required for S3-compatible stores like Railway/Tigris
+    forcePathStyle: false, // Tigris requires virtual-hosted-style URLs (not path-style)
     credentials: { accessKeyId, secretAccessKey },
     // Disable automatic CRC32 checksum — AWS SDK v3 embeds a checksum for an
     // empty body into presigned URLs, but the actual upload has real image data,
