@@ -53,8 +53,8 @@ export const errorHandler = (
   }
 
   logger.error(`[${req.method}] ${req.path} >> StatusCode: ${statusCode}, Message: ${message}`, {
-    error: error,
-    stack: err.stack,
+    errorMessage: error,
+    errorStack: err.stack,
     body: req.body,
     params: req.params,
     query: req.query,

@@ -76,15 +76,24 @@ export class SubscriptionService {
         const amountPaise = planPrice * 100;
         const receipt = `driversub:${params.driverId}:${Date.now()}`;
 
-        const order = await razorpay.orders.create({
-            amount: amountPaise,
-            currency: 'INR',
-            receipt,
-            notes: {
-                purpose: 'DRIVER_SUBSCRIPTION',
+        let order: any;
+        try {
+            order = await razorpay.orders.create({
+                amount: amountPaise,
+                currency: 'INR',
+                receipt,
+                notes: {
+                    purpose: 'DRIVER_SUBSCRIPTION',
+                    driverId: params.driverId,
+                },
+            });
+        } catch (error: any) {
+            logger.error('Failed to create Razorpay order for Driver Subscription', {
                 driverId: params.driverId,
-            },
-        });
+                errorPayload: error?.error || error?.message || error,
+            });
+            throw new AppError(`Razorpay Order Creation Failed: ${error?.error?.description || error?.message || 'Unknown error'}`, 500);
+        }
 
         const payment = await prisma.payment.create({
             data: {
