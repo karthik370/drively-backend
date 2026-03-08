@@ -260,7 +260,11 @@ export class BookingService {
         const requireExperienced = Boolean((b as any).requireExperienced);
         const isExperienced = Boolean((driver as any).isExperienced);
         if (requireExperienced && !isExperienced) {
-          return null;
+          const bookingTime = new Date((b as any).createdAt).getTime();
+          const minutesElapsed = (Date.now() - bookingTime) / (1000 * 60);
+          if (minutesElapsed < 15) {
+            return null;
+          }
         }
 
         const pickupLat = Number(b.pickupLocationLat);
