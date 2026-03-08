@@ -12,7 +12,7 @@ export const getSubscriptionStatus = asyncHandler(async (req: AuthRequest, res: 
     const result = await SubscriptionService.getSubscriptionStatus(req.user.id);
 
     res.status(200).json({
-        status: 'success',
+        success: true,
         data: result,
     });
 });
@@ -34,7 +34,7 @@ export const createSubscriptionOrder = asyncHandler(async (req: AuthRequest, res
     });
 
     res.status(200).json({
-        status: 'success',
+        success: true,
         data: result,
     });
 });
@@ -58,7 +58,7 @@ export const verifySubscriptionPayment = asyncHandler(async (req: AuthRequest, r
     });
 
     res.status(200).json({
-        status: 'success',
+        success: true,
         data: result,
     });
 });
