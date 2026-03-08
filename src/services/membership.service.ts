@@ -65,7 +65,7 @@ export class MembershipService {
 
     const razorpay = getRazorpayClient();
     const amountPaise = Math.round(Number(plan.price) * 100);
-    const receipt = `membership:${params.userId}:${plan.type}:${Date.now()}`;
+    const receipt = `mem_${params.userId.slice(-8)}_${Date.now()}`;
 
     const order = await razorpay.orders.create({
       amount: amountPaise,

@@ -74,7 +74,7 @@ export class SubscriptionService {
         const planPrice = 500; // Fixed ₹500/month
         const razorpay = getRazorpayClient();
         const amountPaise = planPrice * 100;
-        const receipt = `driversub:${params.driverId}:${Date.now()}`;
+        const receipt = `dsub_${params.driverId.slice(-8)}_${Date.now()}`;
 
         let order: any;
         try {

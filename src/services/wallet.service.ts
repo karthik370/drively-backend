@@ -91,7 +91,7 @@ export class WalletService {
     const razorpay = getRazorpayClient();
     const amountPaise = Math.round(amount * 100);
 
-    const receipt = `wallet_topup:${params.userId}:${Date.now()}`;
+    const receipt = `wtop_${params.userId.slice(-8)}_${Date.now()}`;
 
     const order = await razorpay.orders.create({
       amount: amountPaise,
