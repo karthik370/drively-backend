@@ -6,17 +6,13 @@ import { getSocketServer } from '../socket/io';
 import { VerificationStatus } from '@prisma/client';
 
 const hasSubmittedDocs = (p: any): boolean => {
-  const licenseOk = typeof p?.licenseNumber === 'string' && p.licenseNumber.trim() && !p.licenseNumber.startsWith('PEND-');
-  const aadhaarOk = typeof p?.aadhaarNumber === 'string' && p.aadhaarNumber.trim() && !p.aadhaarNumber.startsWith('PEND-AAD-');
-  const panOk = typeof p?.panNumber === 'string' && p.panNumber.trim() && !p.panNumber.startsWith('PEND');
-
   const licenseImgOk = typeof p?.licenseImageUrl === 'string' && p.licenseImageUrl.trim().length > 0;
   const aadhaarImgOk = typeof p?.aadhaarImageUrl === 'string' && p.aadhaarImageUrl.trim().length > 0;
   const panImgOk = typeof p?.panImageUrl === 'string' && p.panImageUrl.trim().length > 0;
 
   const selfieOk = typeof p?.user?.profileImage === 'string' && p.user.profileImage.trim().length > 0;
 
-  return Boolean(licenseOk && aadhaarOk && panOk && licenseImgOk && aadhaarImgOk && panImgOk && selfieOk);
+  return Boolean(licenseImgOk && aadhaarImgOk && panImgOk && selfieOk);
 };
 
 export class AdminController {

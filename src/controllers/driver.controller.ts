@@ -15,17 +15,13 @@ const toNumber = (v: unknown): number => {
 const isFiniteNumber = (n: number) => Number.isFinite(n);
 
 const hasSubmittedDocs = (p: any): boolean => {
-  const licenseOk = typeof p?.licenseNumber === 'string' && p.licenseNumber.trim() && !p.licenseNumber.startsWith('PEND-');
-  const aadhaarOk = typeof p?.aadhaarNumber === 'string' && p.aadhaarNumber.trim() && !p.aadhaarNumber.startsWith('PEND-AAD-');
-  const panOk = typeof p?.panNumber === 'string' && p.panNumber.trim() && !p.panNumber.startsWith('PEND');
-
   const licenseImgOk = typeof p?.licenseImageUrl === 'string' && p.licenseImageUrl.trim().length > 0;
   const aadhaarImgOk = typeof p?.aadhaarImageUrl === 'string' && p.aadhaarImageUrl.trim().length > 0;
   const panImgOk = typeof p?.panImageUrl === 'string' && p.panImageUrl.trim().length > 0;
 
   const selfieOk = typeof p?.user?.profileImage === 'string' && p.user.profileImage.trim().length > 0;
 
-  return Boolean(licenseOk && aadhaarOk && panOk && licenseImgOk && aadhaarImgOk && panImgOk && selfieOk);
+  return Boolean(licenseImgOk && aadhaarImgOk && panImgOk && selfieOk);
 };
 
 // ─── Cloudinary config ───────────────────────────────────────────────────────
@@ -184,10 +180,6 @@ export class DriverController {
     const panImageUrl = typeof (req.body as any)?.panImageUrl === 'string' ? (req.body as any).panImageUrl.trim() : '';
 
     const profileImage = typeof (req.body as any)?.profileImage === 'string' ? (req.body as any).profileImage.trim() : '';
-
-    if (!licenseNumber || !aadhaarNumber || !panNumber) {
-      throw new AppError('Missing required document numbers', 400);
-    }
 
     if (!licenseImageUrl || !aadhaarImageUrl || !panImageUrl) {
       throw new AppError('Missing required document images', 400);
