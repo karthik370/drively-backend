@@ -206,14 +206,18 @@ export const getRoute = async (
       return fallback('All Google routes absurdly long');
     }
 
-    const bestDurationInTraffic = Math.min(...finalCandidates.map((c) => c.durationInTraffic));
-    const nearFast = finalCandidates.filter((c) => c.durationInTraffic <= bestDurationInTraffic * 1.1);
+    // Pick the shortest-distance route
+    const bestDistance = Math.min(...finalCandidates.map((c) => c.distance));
+    // Allow routes within 10% of shortest distance
+    const nearShortest = finalCandidates.filter((c) => c.distance <= bestDistance * 1.1);
 
-    const chosen = (nearFast.length ? nearFast : finalCandidates)
+    const chosen = (nearShortest.length ? nearShortest : finalCandidates)
       .slice()
       .sort((a, b) => {
-        if (a.durationInTraffic !== b.durationInTraffic) return a.durationInTraffic - b.durationInTraffic;
-        return a.distance - b.distance;
+        // Prefer shortest distance first
+        if (a.distance !== b.distance) return a.distance - b.distance;
+        // Tiebreak by fastest travel time
+        return a.durationInTraffic - b.durationInTraffic;
       })[0];
 
     const poly = chosen.poly;
