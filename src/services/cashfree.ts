@@ -1,35 +1,33 @@
 /**
  * Cashfree Payment Gateway — Shared Utility
  * ──────────────────────────────────────────
- * Centralises Cashfree client initialisation, order creation,
- * payment verification and webhook validation so every service
- * file can import helpers instead of duplicating boilerplate.
+ * Uses the Cashfree REST API directly (via axios) for order creation
+ * and the cashfree-pg SDK only for webhook verification.
+ *
+ * Direct REST calls give us full control over request/response handling
+ * and avoid SDK version compatibility issues.
  */
-import { Cashfree, CFEnvironment, CreateOrderRequest, OrderEntity } from 'cashfree-pg';
+import axios from 'axios';
 import crypto from 'crypto';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 
-// ── Singleton client ───────────────────────────────────────────────────────
-let _client: Cashfree | null = null;
-
-export const getCashfreeClient = (): Cashfree => {
-  if (_client) return _client;
-
+// ── Config ─────────────────────────────────────────────────────────────────
+const getCashfreeConfig = () => {
   const appId = process.env.CASHFREE_APP_ID;
   const secretKey = process.env.CASHFREE_SECRET_KEY;
+  const env = process.env.CASHFREE_ENV === 'PRODUCTION' ? 'PRODUCTION' : 'SANDBOX';
 
   if (!appId || !secretKey) {
     throw new AppError('Cashfree credentials are not configured (CASHFREE_APP_ID / CASHFREE_SECRET_KEY)', 500);
   }
 
-  const env =
-    process.env.CASHFREE_ENV === 'PRODUCTION'
-      ? CFEnvironment.PRODUCTION
-      : CFEnvironment.SANDBOX;
+  const baseUrl =
+    env === 'PRODUCTION'
+      ? 'https://api.cashfree.com/pg'
+      : 'https://sandbox.cashfree.com/pg';
 
-  _client = new Cashfree(env, appId, secretKey);
-  return _client;
+  return { appId, secretKey, env, baseUrl };
 };
 
 // ── Create Order ───────────────────────────────────────────────────────────
@@ -42,8 +40,8 @@ export type CashfreeOrderResult = {
 };
 
 /**
- * Creates a Cashfree order.
- * @param amount  — In **Rupees** (NOT paise).  e.g. 500 for ₹500
+ * Creates a Cashfree order using the REST API directly.
+ * @param amount — In **Rupees** (NOT paise). e.g. 500 for ₹500
  */
 export const createCashfreeOrder = async (params: {
   orderId: string;
@@ -56,48 +54,52 @@ export const createCashfreeOrder = async (params: {
   orderNote?: string;
   orderTags?: Record<string, string>;
 }): Promise<CashfreeOrderResult> => {
-  const cf = getCashfreeClient();
+  const { appId, secretKey, baseUrl } = getCashfreeConfig();
 
-  const request: CreateOrderRequest = {
+  const requestBody = {
     order_id: params.orderId,
     order_amount: params.amount,
     order_currency: params.currency || 'INR',
     customer_details: {
       customer_id: params.customerId,
       customer_phone: params.customerPhone,
-      customer_email: params.customerEmail,
-      customer_name: params.customerName,
+      customer_email: params.customerEmail || undefined,
+      customer_name: params.customerName || undefined,
     },
     order_note: params.orderNote,
     order_tags: params.orderTags,
   };
 
-  const response = await cf.PGCreateOrder(request);
+  logger.info('[Cashfree] Creating order', {
+    orderId: params.orderId,
+    amount: params.amount,
+    url: `${baseUrl}/orders`,
+  });
 
-  // cashfree-pg SDK v5 may return data at different nesting levels.
-  // Try: response.data  →  response itself  →  response.data.data
-  const raw = response as any;
-  const order: any =
-    (raw?.data?.payment_session_id ? raw.data : null) ||
-    (raw?.payment_session_id ? raw : null) ||
-    (raw?.data?.data?.payment_session_id ? raw.data.data : null) ||
-    raw?.data ||
-    raw;
+  const response = await axios.post(`${baseUrl}/orders`, requestBody, {
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-version': '2023-08-01',
+      'x-client-id': appId,
+      'x-client-secret': secretKey,
+    },
+  });
 
-  logger.info('[Cashfree] PGCreateOrder response', {
-    responseKeys: Object.keys(raw || {}),
-    dataKeys: Object.keys(raw?.data || {}),
+  const order = response.data;
+
+  logger.info('[Cashfree] Order created', {
     order_id: order?.order_id,
     cf_order_id: order?.cf_order_id,
     payment_session_id: order?.payment_session_id ? 'present' : 'MISSING',
+    order_status: order?.order_status,
   });
 
   const sessionId = order?.payment_session_id;
   const orderId = order?.order_id;
 
   if (!sessionId || !orderId) {
-    logger.error('[Cashfree] Missing fields in order response', {
-      fullResponse: JSON.stringify(raw?.data ?? raw, null, 2),
+    logger.error('[Cashfree] Missing payment_session_id or order_id in response', {
+      responseData: JSON.stringify(order, null, 2),
     });
     throw new AppError('Cashfree order creation failed — missing session/order ID', 500);
   }
@@ -119,22 +121,35 @@ export type CashfreePaymentStatus = {
 };
 
 export const verifyCashfreePayment = async (orderId: string): Promise<CashfreePaymentStatus> => {
-  const cf = getCashfreeClient();
-  const response = await cf.PGFetchOrder(orderId);
-  const order = response.data as OrderEntity;
+  const { appId, secretKey, baseUrl } = getCashfreeConfig();
 
-  const status = String(order.order_status || '').toUpperCase();
+  const response = await axios.get(`${baseUrl}/orders/${orderId}`, {
+    headers: {
+      'x-api-version': '2023-08-01',
+      'x-client-id': appId,
+      'x-client-secret': secretKey,
+    },
+  });
+
+  const order = response.data;
+  const status = String(order?.order_status || '').toUpperCase();
   const isPaid = status === 'PAID';
 
   // Try to get the cf_payment_id from payments
   let cfPaymentId: string | undefined;
   try {
-    const paymentsResp = await cf.PGOrderFetchPayments(orderId);
+    const paymentsResp = await axios.get(`${baseUrl}/orders/${orderId}/payments`, {
+      headers: {
+        'x-api-version': '2023-08-01',
+        'x-client-id': appId,
+        'x-client-secret': secretKey,
+      },
+    });
     const payments = paymentsResp.data;
     if (Array.isArray(payments) && payments.length > 0) {
       const successPayment = payments.find((p: any) => String(p.payment_status).toUpperCase() === 'SUCCESS');
       if (successPayment) {
-        cfPaymentId = String((successPayment as any).cf_payment_id || '');
+        cfPaymentId = String(successPayment.cf_payment_id || '');
       }
     }
   } catch {
@@ -150,10 +165,17 @@ export const verifyCashfreeWebhook = (params: {
   rawBody: string;
   timestamp: string;
 }): boolean => {
-  const cf = getCashfreeClient();
+  const { secretKey } = getCashfreeConfig();
+
   try {
-    cf.PGVerifyWebhookSignature(params.signature, params.rawBody, params.timestamp);
-    return true;
+    // Cashfree uses HMAC-SHA256 for webhook verification
+    const payload = params.timestamp + params.rawBody;
+    const expectedSignature = crypto
+      .createHmac('sha256', secretKey)
+      .update(payload)
+      .digest('base64');
+
+    return expectedSignature === params.signature;
   } catch {
     return false;
   }
