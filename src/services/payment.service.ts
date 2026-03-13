@@ -1,52 +1,7 @@
-import Razorpay from 'razorpay';
-import crypto from 'crypto';
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
-
-type RazorpayOrderResponse = {
-  id: string;
-  entity: 'order';
-  amount: number;
-  amount_paid: number;
-  amount_due: number;
-  currency: string;
-  receipt: string | null;
-  status: string;
-  attempts: number;
-  notes: Record<string, any>;
-  created_at: number;
-};
-
-const getRazorpayClient = (): Razorpay => {
-  const keyId = process.env.RAZORPAY_KEY_ID;
-  const keySecret = process.env.RAZORPAY_KEY_SECRET;
-
-  if (!keyId || !keySecret) {
-    throw new AppError('Razorpay credentials are not configured', 500);
-  }
-
-  return new Razorpay({
-    key_id: keyId,
-    key_secret: keySecret,
-  });
-};
-
-const getWebhookSecret = (): string => {
-  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-  if (!secret) {
-    throw new AppError('Razorpay webhook secret is not configured', 500);
-  }
-  return secret;
-};
-
-const toPaise = (amount: unknown): number => {
-  const n = typeof amount === 'number' ? amount : Number(amount);
-  if (!Number.isFinite(n)) {
-    throw new AppError('Invalid amount', 400);
-  }
-  return Math.max(0, Math.round(n * 100));
-};
+import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId } from './cashfree';
 
 export class PaymentService {
   static async createOrder(params: { userId: string; bookingId: string }) {
@@ -80,22 +35,32 @@ export class PaymentService {
       throw new AppError('Cash payment does not require an online order', 400);
     }
 
-    const amountPaise = toPaise(booking.totalAmount);
-    if (amountPaise <= 0) {
+    const amount = Number(booking.totalAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
       throw new AppError('Booking amount must be greater than 0', 400);
     }
 
-    const razorpay = getRazorpayClient();
+    // Fetch customer details for Cashfree
+    const user = await prisma.user.findUnique({
+      where: { id: params.userId },
+      select: { phoneNumber: true, email: true, firstName: true, lastName: true },
+    });
 
-    const order = (await razorpay.orders.create({
-      amount: amountPaise,
-      currency: 'INR',
-      receipt: booking.id,
-      notes: {
+    const cfOrderId = generateOrderId('book', booking.id);
+
+    const cfOrder = await createCashfreeOrder({
+      orderId: cfOrderId,
+      amount,
+      customerId: params.userId,
+      customerPhone: user?.phoneNumber || '9999999999',
+      customerEmail: user?.email || undefined,
+      customerName: [user?.firstName, user?.lastName].filter(Boolean).join(' ') || undefined,
+      orderNote: `Booking ${booking.id}`,
+      orderTags: {
         bookingId: booking.id,
         userId: params.userId,
       },
-    })) as unknown as RazorpayOrderResponse;
+    });
 
     const payment = await prisma.payment.create({
       data: {
@@ -104,14 +69,13 @@ export class PaymentService {
         amount: booking.totalAmount,
         paymentMethod: booking.paymentMethod,
         status: PaymentStatus.PENDING,
-        gatewayTransactionId: order.id,
+        gatewayTransactionId: cfOrder.orderId,
         gatewayResponse: {
-          razorpayOrderId: order.id,
-          amount: order.amount,
-          currency: order.currency,
-          receipt: order.receipt,
-          status: order.status,
-          created_at: order.created_at,
+          cfOrderId: cfOrder.cfOrderId,
+          orderId: cfOrder.orderId,
+          paymentSessionId: cfOrder.paymentSessionId,
+          amount: cfOrder.orderAmount,
+          currency: cfOrder.orderCurrency,
         } as any,
       },
       select: { id: true },
@@ -129,30 +93,17 @@ export class PaymentService {
       alreadyPaid: false,
       bookingId: booking.id,
       paymentId: payment.id,
-      orderId: order.id,
-      amount: order.amount,
-      currency: order.currency,
-      keyId: process.env.RAZORPAY_KEY_ID as string,
+      orderId: cfOrder.orderId,
+      paymentSessionId: cfOrder.paymentSessionId,
+      amount: cfOrder.orderAmount,
+      currency: cfOrder.orderCurrency,
     };
-  }
-
-  static verifySignature(params: { orderId: string; paymentId: string; signature: string }): boolean {
-    const secret = process.env.RAZORPAY_KEY_SECRET;
-    if (!secret) {
-      throw new AppError('Razorpay credentials are not configured', 500);
-    }
-
-    const body = `${params.orderId}|${params.paymentId}`;
-    const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
-    return expected === params.signature;
   }
 
   static async verifyPayment(params: {
     userId: string;
     bookingId: string;
-    razorpayOrderId: string;
-    razorpayPaymentId: string;
-    razorpaySignature: string;
+    cfOrderId: string;
   }) {
     const booking = await prisma.booking.findUnique({
       where: { id: params.bookingId },
@@ -171,14 +122,11 @@ export class PaymentService {
       throw new AppError('Not authorized for this booking', 403);
     }
 
-    const ok = this.verifySignature({
-      orderId: params.razorpayOrderId,
-      paymentId: params.razorpayPaymentId,
-      signature: params.razorpaySignature,
-    });
+    // Ask Cashfree directly for the order status
+    const cfStatus = await verifyCashfreePayment(params.cfOrderId);
 
-    if (!ok) {
-      throw new AppError('Invalid payment signature', 400);
+    if (!cfStatus.isPaid) {
+      throw new AppError(`Payment not completed. Order status: ${cfStatus.orderStatus}`, 400);
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -205,9 +153,8 @@ export class PaymentService {
           processedAt: new Date(),
           gatewayResponse: {
             ...(typeof payment.gatewayResponse === 'object' && payment.gatewayResponse ? (payment.gatewayResponse as any) : {}),
-            razorpayOrderId: params.razorpayOrderId,
-            razorpayPaymentId: params.razorpayPaymentId,
-            razorpaySignature: params.razorpaySignature,
+            cfPaymentId: cfStatus.cfPaymentId,
+            orderStatus: cfStatus.orderStatus,
             verifiedAt: new Date().toISOString(),
           } as any,
         },
@@ -231,36 +178,32 @@ export class PaymentService {
     };
   }
 
-  static verifyWebhookSignature(rawBody: Buffer, signature: string): boolean {
-    const secret = getWebhookSecret();
-    const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-    return expected === signature;
-  }
-
-  static async handleRazorpayWebhook(params: { rawBody: Buffer; signature: string | null; payload: any }) {
-    if (!params.signature) {
-      throw new AppError('Missing Razorpay signature header', 400);
+  static async handleCashfreeWebhook(params: { rawBody: string; signature: string | null; timestamp: string | null; payload: any }) {
+    if (!params.signature || !params.timestamp) {
+      throw new AppError('Missing Cashfree signature/timestamp header', 400);
     }
 
-    const ok = this.verifyWebhookSignature(params.rawBody, params.signature);
+    const ok = verifyCashfreeWebhook({
+      signature: params.signature,
+      rawBody: params.rawBody,
+      timestamp: params.timestamp,
+    });
     if (!ok) {
       throw new AppError('Invalid webhook signature', 400);
     }
 
-    const event = String(params.payload?.event ?? '');
-
-    const paymentEntity = params.payload?.payload?.payment?.entity;
-    const orderId = typeof paymentEntity?.order_id === 'string' ? paymentEntity.order_id : null;
-    const gatewayPaymentId = typeof paymentEntity?.id === 'string' ? paymentEntity.id : null;
+    const eventType = String(params.payload?.type ?? '');
+    const orderData = params.payload?.data?.order;
+    const paymentData = params.payload?.data?.payment;
+    const orderId = orderData?.order_id || paymentData?.order?.order_id;
+    const cfPaymentId = paymentData?.cf_payment_id;
 
     if (!orderId) {
       return { received: true };
     }
 
     const payment = await prisma.payment.findFirst({
-      where: {
-        gatewayTransactionId: orderId,
-      },
+      where: { gatewayTransactionId: orderId },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -268,7 +211,7 @@ export class PaymentService {
       return { received: true };
     }
 
-    if (event === 'payment.captured' || event === 'order.paid') {
+    if (eventType === 'PAYMENT_SUCCESS_WEBHOOK' || eventType === 'ORDER_PAID_WEBHOOK') {
       await prisma.$transaction(async (tx) => {
         await tx.payment.update({
           where: { id: payment.id },
@@ -277,8 +220,8 @@ export class PaymentService {
             processedAt: new Date(),
             gatewayResponse: {
               ...(typeof payment.gatewayResponse === 'object' && payment.gatewayResponse ? (payment.gatewayResponse as any) : {}),
-              webhookEvent: event,
-              razorpayPaymentId: gatewayPaymentId,
+              webhookEvent: eventType,
+              cfPaymentId,
               webhookReceivedAt: new Date().toISOString(),
             } as any,
           },

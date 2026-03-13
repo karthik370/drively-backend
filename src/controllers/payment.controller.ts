@@ -11,9 +11,7 @@ const createOrderSchema = Joi.object({
 
 const verifySchema = Joi.object({
   bookingId: Joi.string().required(),
-  razorpay_order_id: Joi.string().required(),
-  razorpay_payment_id: Joi.string().required(),
-  razorpay_signature: Joi.string().required(),
+  cf_order_id: Joi.string().required(),
 });
 
 export class PaymentController {
@@ -51,9 +49,7 @@ export class PaymentController {
     const result = await PaymentService.verifyPayment({
       userId: req.user.id,
       bookingId: value.bookingId,
-      razorpayOrderId: value.razorpay_order_id,
-      razorpayPaymentId: value.razorpay_payment_id,
-      razorpaySignature: value.razorpay_signature,
+      cfOrderId: value.cf_order_id,
     });
 
     res.status(200).json({
@@ -62,17 +58,21 @@ export class PaymentController {
     });
   });
 
-  static razorpayWebhook = asyncHandler(async (req: any, res: Response) => {
-    const signature = typeof req.headers['x-razorpay-signature'] === 'string' ? req.headers['x-razorpay-signature'] : null;
-    const rawBody = (req as any).rawBody as Buffer | undefined;
+  static cashfreeWebhook = asyncHandler(async (req: any, res: Response) => {
+    const signature = typeof req.headers['x-webhook-signature'] === 'string' ? req.headers['x-webhook-signature'] : null;
+    const timestamp = typeof req.headers['x-webhook-timestamp'] === 'string' ? req.headers['x-webhook-timestamp'] : null;
+    const rawBody = (req as any).rawBody;
 
-    if (!rawBody || !Buffer.isBuffer(rawBody)) {
+    if (!rawBody) {
       throw new AppError('Raw body not available for webhook verification', 500);
     }
 
-    const result = await PaymentService.handleRazorpayWebhook({
-      rawBody,
+    const rawBodyStr = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : String(rawBody);
+
+    const result = await PaymentService.handleCashfreeWebhook({
+      rawBody: rawBodyStr,
       signature,
+      timestamp,
       payload: req.body,
     });
 

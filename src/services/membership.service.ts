@@ -1,27 +1,7 @@
 import { MembershipPurchaseStatus, MembershipType, PaymentMethod, PaymentStatus, Prisma } from '@prisma/client';
-import crypto from 'crypto';
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
-import Razorpay from 'razorpay';
-
-const getRazorpayClient = (): Razorpay => {
-  const keyId = process.env.RAZORPAY_KEY_ID;
-  const keySecret = process.env.RAZORPAY_KEY_SECRET;
-  if (!keyId || !keySecret) {
-    throw new AppError('Razorpay credentials are not configured', 500);
-  }
-  return new Razorpay({ key_id: keyId, key_secret: keySecret });
-};
-
-const verifyRazorpaySignature = (params: { orderId: string; paymentId: string; signature: string }) => {
-  const secret = process.env.RAZORPAY_KEY_SECRET;
-  if (!secret) {
-    throw new AppError('Razorpay credentials are not configured', 500);
-  }
-  const body = `${params.orderId}|${params.paymentId}`;
-  const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
-  return expected === params.signature;
-};
+import { createCashfreeOrder, verifyCashfreePayment, generateOrderId } from './cashfree';
 
 export class MembershipService {
   static async listPlans() {
@@ -63,15 +43,22 @@ export class MembershipService {
       throw new AppError('Customer profile not found', 404);
     }
 
-    const razorpay = getRazorpayClient();
-    const amountPaise = Math.round(Number(plan.price) * 100);
-    const receipt = `mem_${params.userId.slice(-8)}_${Date.now()}`;
+    const user = await prisma.user.findUnique({
+      where: { id: params.userId },
+      select: { phoneNumber: true, email: true, firstName: true, lastName: true },
+    });
 
-    const order = await razorpay.orders.create({
-      amount: amountPaise,
-      currency: 'INR',
-      receipt,
-      notes: {
+    const cfOrderId = generateOrderId('mem', params.userId);
+
+    const cfOrder = await createCashfreeOrder({
+      orderId: cfOrderId,
+      amount: Number(plan.price),
+      customerId: params.userId,
+      customerPhone: user?.phoneNumber || '9999999999',
+      customerEmail: user?.email || undefined,
+      customerName: [user?.firstName, user?.lastName].filter(Boolean).join(' ') || undefined,
+      orderNote: `Membership: ${plan.title}`,
+      orderTags: {
         purpose: 'MEMBERSHIP',
         userId: params.userId,
         membershipType: plan.type,
@@ -85,10 +72,11 @@ export class MembershipService {
         amount: plan.price,
         paymentMethod: params.paymentMethod,
         status: PaymentStatus.PENDING,
-        gatewayTransactionId: String((order as any).id),
+        gatewayTransactionId: cfOrder.orderId,
         gatewayResponse: {
-          razorpayOrderId: String((order as any).id),
-          receipt,
+          cfOrderId: cfOrder.cfOrderId,
+          orderId: cfOrder.orderId,
+          paymentSessionId: cfOrder.paymentSessionId,
           purpose: 'MEMBERSHIP',
           membershipType: plan.type,
         } as any,
@@ -112,28 +100,21 @@ export class MembershipService {
 
     return {
       purchaseId: purchase.id,
-      orderId: String((order as any).id),
-      amount: Number((order as any).amount),
-      currency: String((order as any).currency || 'INR'),
-      keyId: process.env.RAZORPAY_KEY_ID as string,
+      orderId: cfOrder.orderId,
+      paymentSessionId: cfOrder.paymentSessionId,
+      amount: cfOrder.orderAmount,
+      currency: cfOrder.orderCurrency,
     };
   }
 
   static async verifyPurchase(params: {
     userId: string;
     purchaseId: string;
-    razorpayOrderId: string;
-    razorpayPaymentId: string;
-    razorpaySignature: string;
+    cfOrderId: string;
   }) {
-    const ok = verifyRazorpaySignature({
-      orderId: params.razorpayOrderId,
-      paymentId: params.razorpayPaymentId,
-      signature: params.razorpaySignature,
-    });
-
-    if (!ok) {
-      throw new AppError('Invalid payment signature', 400);
+    const cfStatus = await verifyCashfreePayment(params.cfOrderId);
+    if (!cfStatus.isPaid) {
+      throw new AppError(`Payment not completed. Status: ${cfStatus.orderStatus}`, 400);
     }
 
     return await prisma.$transaction(async (tx) => {
@@ -164,8 +145,8 @@ export class MembershipService {
             processedAt: new Date(),
             gatewayResponse: {
               ...(typeof payment.gatewayResponse === 'object' && payment.gatewayResponse ? (payment.gatewayResponse as any) : {}),
-              razorpayPaymentId: params.razorpayPaymentId,
-              razorpaySignature: params.razorpaySignature,
+              cfPaymentId: cfStatus.cfPaymentId,
+              orderStatus: cfStatus.orderStatus,
               verifiedAt: new Date().toISOString(),
             } as any,
           },

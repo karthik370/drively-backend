@@ -12,9 +12,7 @@ const createOrderSchema = Joi.object({
 
 const verifySchema = Joi.object({
   purchaseId: Joi.string().required(),
-  razorpay_order_id: Joi.string().required(),
-  razorpay_payment_id: Joi.string().required(),
-  razorpay_signature: Joi.string().required(),
+  cf_order_id: Joi.string().required(),
 });
 
 export class MembershipController {
@@ -55,9 +53,7 @@ export class MembershipController {
     const data = await MembershipService.verifyPurchase({
       userId: req.user.id,
       purchaseId: value.purchaseId,
-      razorpayOrderId: value.razorpay_order_id,
-      razorpayPaymentId: value.razorpay_payment_id,
-      razorpaySignature: value.razorpay_signature,
+      cfOrderId: value.cf_order_id,
     });
 
     res.status(200).json({ success: true, data });

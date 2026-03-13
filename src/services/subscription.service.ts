@@ -1,28 +1,8 @@
 import { PaymentMethod, PaymentStatus, Prisma, SubscriptionStatus } from '@prisma/client';
-import crypto from 'crypto';
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
-import Razorpay from 'razorpay';
+import { createCashfreeOrder, verifyCashfreePayment, generateOrderId } from './cashfree';
 import { logger } from '../utils/logger';
-
-const getRazorpayClient = (): Razorpay => {
-    const keyId = process.env.RAZORPAY_KEY_ID;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
-    if (!keyId || !keySecret) {
-        throw new AppError('Razorpay credentials are not configured', 500);
-    }
-    return new Razorpay({ key_id: keyId, key_secret: keySecret });
-};
-
-const verifyRazorpaySignature = (params: { orderId: string; paymentId: string; signature: string }) => {
-    const secret = process.env.RAZORPAY_KEY_SECRET;
-    if (!secret) {
-        throw new AppError('Razorpay credentials are not configured', 500);
-    }
-    const body = `${params.orderId}|${params.paymentId}`;
-    const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
-    return expected === params.signature;
-};
 
 export class SubscriptionService {
     static async getSubscriptionStatus(driverId: string) {
@@ -43,7 +23,6 @@ export class SubscriptionService {
         const now = new Date();
         const isExpired = sub.validUntil ? now > sub.validUntil : true;
 
-        // Automatically update status if expired but record still shows ACTIVE
         if (isExpired && sub.status === SubscriptionStatus.ACTIVE) {
             await prisma.driverSubscription.update({
                 where: { id: sub.id },
@@ -71,28 +50,35 @@ export class SubscriptionService {
             throw new AppError('Driver profile not found', 404);
         }
 
-        const planPrice = 500; // Fixed ₹500/month
-        const razorpay = getRazorpayClient();
-        const amountPaise = planPrice * 100;
-        const receipt = `dsub_${params.driverId.slice(-8)}_${Date.now()}`;
+        const user = await prisma.user.findUnique({
+            where: { id: params.driverId },
+            select: { phoneNumber: true, email: true, firstName: true, lastName: true },
+        });
 
-        let order: any;
+        const planPrice = 500;
+        const cfOrderId = generateOrderId('dsub', params.driverId);
+
+        let cfOrder;
         try {
-            order = await razorpay.orders.create({
-                amount: amountPaise,
-                currency: 'INR',
-                receipt,
-                notes: {
+            cfOrder = await createCashfreeOrder({
+                orderId: cfOrderId,
+                amount: planPrice,
+                customerId: params.driverId,
+                customerPhone: user?.phoneNumber || '9999999999',
+                customerEmail: user?.email || undefined,
+                customerName: [user?.firstName, user?.lastName].filter(Boolean).join(' ') || undefined,
+                orderNote: 'Driver Subscription',
+                orderTags: {
                     purpose: 'DRIVER_SUBSCRIPTION',
                     driverId: params.driverId,
                 },
             });
         } catch (error: any) {
-            logger.error('Failed to create Razorpay order for Driver Subscription', {
+            logger.error('Failed to create Cashfree order for Driver Subscription', {
                 driverId: params.driverId,
-                errorPayload: error?.error || error?.message || error,
+                errorPayload: error?.message || error,
             });
-            throw new AppError(`Razorpay Order Creation Failed: ${error?.error?.description || error?.message || 'Unknown error'}`, 500);
+            throw new AppError(`Cashfree Order Creation Failed: ${error?.message || 'Unknown error'}`, 500);
         }
 
         const payment = await prisma.payment.create({
@@ -102,16 +88,16 @@ export class SubscriptionService {
                 amount: planPrice,
                 paymentMethod: params.paymentMethod,
                 status: PaymentStatus.PENDING,
-                gatewayTransactionId: String((order as any).id),
+                gatewayTransactionId: cfOrder.orderId,
                 gatewayResponse: {
-                    razorpayOrderId: String((order as any).id),
-                    receipt,
+                    cfOrderId: cfOrder.cfOrderId,
+                    orderId: cfOrder.orderId,
+                    paymentSessionId: cfOrder.paymentSessionId,
                     purpose: 'DRIVER_SUBSCRIPTION',
                 } as any,
             },
         });
 
-        // Ensure a subscription record exists (even if inactive)
         const sub = await prisma.driverSubscription.upsert({
             where: { driverId: params.driverId },
             update: {
@@ -127,27 +113,20 @@ export class SubscriptionService {
 
         return {
             subscriptionId: sub.id,
-            orderId: String((order as any).id),
-            amount: Number((order as any).amount),
-            currency: String((order as any).currency || 'INR'),
-            keyId: process.env.RAZORPAY_KEY_ID as string,
+            orderId: cfOrder.orderId,
+            paymentSessionId: cfOrder.paymentSessionId,
+            amount: cfOrder.orderAmount,
+            currency: cfOrder.orderCurrency,
         };
     }
 
     static async verifySubscriptionPayment(params: {
         driverId: string;
-        razorpayOrderId: string;
-        razorpayPaymentId: string;
-        razorpaySignature: string;
+        cfOrderId: string;
     }) {
-        const ok = verifyRazorpaySignature({
-            orderId: params.razorpayOrderId,
-            paymentId: params.razorpayPaymentId,
-            signature: params.razorpaySignature,
-        });
-
-        if (!ok) {
-            throw new AppError('Invalid payment signature', 400);
+        const cfStatus = await verifyCashfreePayment(params.cfOrderId);
+        if (!cfStatus.isPaid) {
+            throw new AppError(`Payment not completed. Status: ${cfStatus.orderStatus}`, 400);
         }
 
         return await prisma.$transaction(async (tx) => {
@@ -169,7 +148,6 @@ export class SubscriptionService {
                 throw new AppError('Payment record not found', 404);
             }
 
-            // If already paid, just return current status idempotently
             if (payment.status === PaymentStatus.PAID && sub.status === SubscriptionStatus.ACTIVE) {
                 return {
                     status: sub.status,
@@ -177,7 +155,6 @@ export class SubscriptionService {
                 };
             }
 
-            // Mark payment as PAID
             await tx.payment.update({
                 where: { id: payment.id },
                 data: {
@@ -185,23 +162,19 @@ export class SubscriptionService {
                     processedAt: new Date(),
                     gatewayResponse: {
                         ...(typeof payment.gatewayResponse === 'object' && payment.gatewayResponse ? (payment.gatewayResponse as any) : {}),
-                        razorpayPaymentId: params.razorpayPaymentId,
-                        razorpaySignature: params.razorpaySignature,
+                        cfPaymentId: cfStatus.cfPaymentId,
+                        orderStatus: cfStatus.orderStatus,
                         verifiedAt: new Date().toISOString(),
                     } as any,
                 },
             });
 
-            // Calculate new expiry (30 days from now)
             const now = new Date();
-            // If they already have an active sub, add 30 days to the existing expiry
-            // Otherwise, start 30 days from today
             let newValidUntil = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
             if (sub.status === SubscriptionStatus.ACTIVE && sub.validUntil && sub.validUntil > now) {
                 newValidUntil = new Date(sub.validUntil.getTime() + 30 * 24 * 60 * 60 * 1000);
             }
 
-            // Activate subscription
             const updatedSub = await tx.driverSubscription.update({
                 where: { id: sub.id },
                 data: {

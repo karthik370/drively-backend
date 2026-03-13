@@ -178,7 +178,7 @@ const signupSchema = Joi.object({
   email: Joi.string().trim().email().optional().allow(''),
   password: Joi.string().min(8).optional(),
   userType: Joi.string().valid('CUSTOMER', 'DRIVER').required(),
-  upiId: Joi.string().trim().max(100).when('userType', { is: 'DRIVER', then: Joi.required(), otherwise: Joi.optional().allow('', null) }),
+  upiId: Joi.string().trim().max(100).optional().allow('', null),
   dateOfBirth: Joi.date().optional(),
   gender: Joi.string().valid('MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY').optional(),
   msg91AccessToken: Joi.string().min(10).optional(),

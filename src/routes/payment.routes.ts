@@ -4,7 +4,7 @@ import PaymentController from '../controllers/payment.controller';
 
 const router = Router();
 
-router.post('/webhook/razorpay', PaymentController.razorpayWebhook);
+router.post('/webhook/cashfree', PaymentController.cashfreeWebhook);
 
 router.use(authenticate);
 

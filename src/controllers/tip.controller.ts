@@ -21,9 +21,7 @@ const orderSchema = Joi.object({
 
 const verifySchema = Joi.object({
   tipId: Joi.string().required(),
-  razorpay_order_id: Joi.string().required(),
-  razorpay_payment_id: Joi.string().required(),
-  razorpay_signature: Joi.string().required(),
+  cf_order_id: Joi.string().required(),
 });
 
 export class TipController {
@@ -80,9 +78,7 @@ export class TipController {
     const data = await TipService.verifyTipPayment({
       customerId: req.user.id,
       tipId: value.tipId,
-      razorpayOrderId: value.razorpay_order_id,
-      razorpayPaymentId: value.razorpay_payment_id,
-      razorpaySignature: value.razorpay_signature,
+      cfOrderId: value.cf_order_id,
     });
 
     res.status(200).json({ success: true, data });

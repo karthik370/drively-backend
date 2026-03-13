@@ -87,9 +87,6 @@ export class AuthService {
 
       if (data.userType === UserType.DRIVER) {
         const upiId = typeof (data as any).upiId === 'string' ? (data as any).upiId.trim() : '';
-        if (!upiId) {
-          throw new AppError('UPI ID is required for drivers', 400);
-        }
 
         const compactId = user.id.replace(/-/g, '');
         const licenseNumber = `PEND-${compactId}`;

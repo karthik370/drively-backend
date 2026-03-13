@@ -12,9 +12,7 @@ const topupSchema = Joi.object({
 });
 
 const topupVerifySchema = Joi.object({
-  razorpay_order_id: Joi.string().required(),
-  razorpay_payment_id: Joi.string().required(),
-  razorpay_signature: Joi.string().required(),
+  cf_order_id: Joi.string().required(),
 });
 
 const walletPaySchema = Joi.object({
@@ -59,9 +57,7 @@ export class WalletController {
 
     const data = await WalletService.verifyTopup({
       userId: req.user.id,
-      razorpayOrderId: value.razorpay_order_id,
-      razorpayPaymentId: value.razorpay_payment_id,
-      razorpaySignature: value.razorpay_signature,
+      cfOrderId: value.cf_order_id,
     });
 
     res.status(200).json({ success: true, data });

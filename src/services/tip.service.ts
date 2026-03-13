@@ -1,27 +1,7 @@
 import { PaymentMethod, PaymentStatus, Prisma, TipStatus, WalletTransactionReason, WalletTransactionStatus, WalletTransactionType } from '@prisma/client';
-import crypto from 'crypto';
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
-import Razorpay from 'razorpay';
-
-const getRazorpayClient = (): Razorpay => {
-  const keyId = process.env.RAZORPAY_KEY_ID;
-  const keySecret = process.env.RAZORPAY_KEY_SECRET;
-  if (!keyId || !keySecret) {
-    throw new AppError('Razorpay credentials are not configured', 500);
-  }
-  return new Razorpay({ key_id: keyId, key_secret: keySecret });
-};
-
-const verifyRazorpaySignature = (params: { orderId: string; paymentId: string; signature: string }) => {
-  const secret = process.env.RAZORPAY_KEY_SECRET;
-  if (!secret) {
-    throw new AppError('Razorpay credentials are not configured', 500);
-  }
-  const body = `${params.orderId}|${params.paymentId}`;
-  const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
-  return expected === params.signature;
-};
+import { createCashfreeOrder, verifyCashfreePayment, generateOrderId } from './cashfree';
 
 const toAmount = (amount: unknown): number => {
   const n = typeof amount === 'number' ? amount : Number(amount);
@@ -169,19 +149,25 @@ export class TipService {
     if (String(tip.customerId) !== String(params.customerId)) throw new AppError('Not authorized', 403);
     if (tip.status === TipStatus.PAID) return { alreadyPaid: true };
 
-    const razorpay = getRazorpayClient();
-    const amountPaise = Math.round(Number(tip.amount) * 100);
-    const receipt = `tip:${tip.id}`;
+    const user = await prisma.user.findUnique({
+      where: { id: params.customerId },
+      select: { phoneNumber: true, email: true, firstName: true, lastName: true },
+    });
 
-    const order = await razorpay.orders.create({
-      amount: amountPaise,
-      currency: 'INR',
-      receipt,
-      notes: {
+    const cfOrderId = generateOrderId('tip', tip.id);
+
+    const cfOrder = await createCashfreeOrder({
+      orderId: cfOrderId,
+      amount: Number(tip.amount),
+      customerId: params.customerId,
+      customerPhone: user?.phoneNumber || '9999999999',
+      customerEmail: user?.email || undefined,
+      customerName: [user?.firstName, user?.lastName].filter(Boolean).join(' ') || undefined,
+      orderNote: `Tip for booking ${tip.bookingId}`,
+      orderTags: {
         purpose: 'TIP',
         tipId: tip.id,
         bookingId: tip.bookingId,
-        userId: params.customerId,
       },
     });
 
@@ -192,8 +178,8 @@ export class TipService {
         amount: tip.amount,
         paymentMethod: PaymentMethod.UPI,
         status: PaymentStatus.PENDING,
-        gatewayTransactionId: String((order as any).id),
-        gatewayResponse: { razorpayOrderId: String((order as any).id), purpose: 'TIP', tipId: tip.id } as any,
+        gatewayTransactionId: cfOrder.orderId,
+        gatewayResponse: { cfOrderId: cfOrder.orderId, purpose: 'TIP', tipId: tip.id } as any,
       },
       select: { id: true },
     });
@@ -206,27 +192,20 @@ export class TipService {
     return {
       alreadyPaid: false,
       tipId: tip.id,
-      orderId: String((order as any).id),
-      amount: Number((order as any).amount),
-      currency: String((order as any).currency || 'INR'),
-      keyId: process.env.RAZORPAY_KEY_ID as string,
+      orderId: cfOrder.orderId,
+      paymentSessionId: cfOrder.paymentSessionId,
+      amount: cfOrder.orderAmount,
+      currency: cfOrder.orderCurrency,
     };
   }
 
   static async verifyTipPayment(params: {
     customerId: string;
     tipId: string;
-    razorpayOrderId: string;
-    razorpayPaymentId: string;
-    razorpaySignature: string;
+    cfOrderId: string;
   }) {
-    const ok = verifyRazorpaySignature({
-      orderId: params.razorpayOrderId,
-      paymentId: params.razorpayPaymentId,
-      signature: params.razorpaySignature,
-    });
-
-    if (!ok) throw new AppError('Invalid payment signature', 400);
+    const cfStatus = await verifyCashfreePayment(params.cfOrderId);
+    if (!cfStatus.isPaid) throw new AppError(`Payment not completed. Status: ${cfStatus.orderStatus}`, 400);
 
     return await prisma.$transaction(async (tx) => {
       const tip = await tx.tip.findUnique({ where: { id: params.tipId } });
@@ -236,7 +215,7 @@ export class TipService {
       if (tip.status === TipStatus.PAID) return { alreadyPaid: true };
 
       const payment = await tx.payment.findFirst({
-        where: { id: tip.paymentId || undefined, gatewayTransactionId: params.razorpayOrderId },
+        where: { id: tip.paymentId || undefined, gatewayTransactionId: params.cfOrderId },
         orderBy: { createdAt: 'desc' },
       });
 
@@ -249,8 +228,8 @@ export class TipService {
           processedAt: new Date(),
           gatewayResponse: {
             ...(typeof payment.gatewayResponse === 'object' && payment.gatewayResponse ? (payment.gatewayResponse as any) : {}),
-            razorpayPaymentId: params.razorpayPaymentId,
-            razorpaySignature: params.razorpaySignature,
+            cfPaymentId: cfStatus.cfPaymentId,
+            orderStatus: cfStatus.orderStatus,
             verifiedAt: new Date().toISOString(),
           } as any,
         },

@@ -44,17 +44,15 @@ export const verifySubscriptionPayment = asyncHandler(async (req: AuthRequest, r
         throw new AppError('Only drivers can access subscriptions', 403);
     }
 
-    const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
+    const { cfOrderId } = req.body;
 
-    if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
-        throw new AppError('Missing Razorpay payment details', 400);
+    if (!cfOrderId) {
+        throw new AppError('Missing Cashfree order ID (cfOrderId)', 400);
     }
 
     const result = await SubscriptionService.verifySubscriptionPayment({
         driverId: req.user.id,
-        razorpayOrderId,
-        razorpayPaymentId,
-        razorpaySignature,
+        cfOrderId,
     });
 
     res.status(200).json({
