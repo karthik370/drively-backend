@@ -743,6 +743,7 @@ export class BookingService {
     io.to(`user:${booking.customerId}`).emit('booking:accepted', {
       bookingId: params.bookingId,
       driverId: params.driverId,
+      otp,
     });
     io.to(`user:${params.driverId}`).emit('booking:accepted', {
       bookingId: params.bookingId,

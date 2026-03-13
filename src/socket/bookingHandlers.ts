@@ -9,6 +9,8 @@ interface AuthenticatedSocket extends Socket {
   userType?: string;
 }
 
+import { sendExpoPushNotification } from '../services/expoPush.service';
+
 export const registerBookingHandlers = (io: Server, socket: AuthenticatedSocket) => {
   socket.on('booking:join', async (bookingId: string) => {
     socket.join(`booking:${bookingId}`);
@@ -180,13 +182,38 @@ export const registerBookingHandlers = (io: Server, socket: AuthenticatedSocket)
   });
 
   socket.on('chat:message', async (data: { bookingId: string; message: string; clientMessageId?: string }) => {
+    const timestamp = new Date();
     io.to(`booking:${data.bookingId}`).emit('chat:message', {
       bookingId: data.bookingId,
       senderId: socket.userId,
       message: data.message,
       clientMessageId: data.clientMessageId,
-      timestamp: new Date(),
+      timestamp,
     });
+
+    // Send push notification to the other party
+    try {
+      const booking = await prisma.booking.findUnique({
+        where: { id: data.bookingId },
+        select: { customerId: true, driverId: true },
+      });
+      if (booking) {
+        const recipientId =
+          socket.userId === booking.customerId
+            ? booking.driverId
+            : booking.customerId;
+        if (recipientId) {
+          await sendExpoPushNotification({
+            userIds: [recipientId],
+            title: 'New message',
+            body: data.message.length > 80 ? data.message.slice(0, 80) + '…' : data.message,
+            data: { kind: 'chat', bookingId: data.bookingId },
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn('Failed to send chat push notification', { error: err, bookingId: data.bookingId });
+    }
   });
 };
 
