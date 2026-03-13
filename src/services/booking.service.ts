@@ -1452,13 +1452,20 @@ export class BookingService {
 
       if (finalBooking.driverId) {
         const earnings = Number((finalBooking as any).driverEarnings || 0);
+        const isCash = (finalBooking as any).paymentMethod === PaymentMethod.CASH;
+
         await prisma.driverProfile.update({
           where: { userId: finalBooking.driverId },
           data: {
             isAvailable: true,
             totalTrips: { increment: 1 },
-            totalEarnings: { increment: earnings },
-            pendingEarnings: { increment: earnings },
+            // Only credit wallet for online payments — CASH is collected directly
+            ...(isCash
+              ? {}
+              : {
+                  totalEarnings: { increment: earnings },
+                  pendingEarnings: { increment: earnings },
+                }),
           } as any,
         });
       }
