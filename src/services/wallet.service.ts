@@ -15,13 +15,17 @@ const toDecimal = (amount: number) => new Prisma.Decimal(amount);
 
 export class WalletService {
   static async getBalance(userId: string) {
-    const profile = await prisma.customerProfile.findUnique({
+    let profile = await prisma.customerProfile.findUnique({
       where: { userId },
       select: { walletBalance: true },
     });
 
+    // Auto-create customerProfile for DRIVER users in customer mode
     if (!profile) {
-      throw new AppError('Customer profile not found', 404);
+      profile = await prisma.customerProfile.create({
+        data: { userId },
+        select: { walletBalance: true },
+      });
     }
 
     return {
@@ -201,7 +205,7 @@ export class WalletService {
     return await prisma.$transaction(async (tx) => {
       const booking = await tx.booking.findUnique({
         where: { id: params.bookingId },
-        select: { id: true, customerId: true, totalAmount: true, paymentStatus: true },
+        select: { id: true, customerId: true, totalAmount: true, paymentStatus: true, driverId: true, driverEarnings: true, status: true },
       });
 
       if (!booking) {
@@ -271,6 +275,20 @@ export class WalletService {
           paymentId: payment.id,
         },
       });
+
+      // Credit driver wallet for wallet payment
+      if (booking.driverId && booking.status === 'COMPLETED') {
+        const earnings = Number(booking.driverEarnings || 0);
+        if (earnings > 0) {
+          await tx.driverProfile.update({
+            where: { userId: booking.driverId },
+            data: {
+              totalEarnings: { increment: earnings },
+              pendingEarnings: { increment: earnings },
+            } as any,
+          });
+        }
+      }
 
       return { alreadyPaid: false, balance: Number(nextBalance) };
     });

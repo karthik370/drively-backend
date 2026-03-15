@@ -3,6 +3,30 @@ import { AppError } from '../middleware/errorHandler';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
 import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId } from './cashfree';
 
+/** Credit driver's wallet after an online payment is confirmed */
+const creditDriverForBooking = async (bookingId: string) => {
+  try {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { driverId: true, driverEarnings: true, status: true },
+    });
+    if (!booking?.driverId) return;
+    // Only credit if booking is COMPLETED (trip is done)
+    if (booking.status !== 'COMPLETED') return;
+    const earnings = Number(booking.driverEarnings || 0);
+    if (earnings <= 0) return;
+    await prisma.driverProfile.update({
+      where: { userId: booking.driverId },
+      data: {
+        totalEarnings: { increment: earnings },
+        pendingEarnings: { increment: earnings },
+      } as any,
+    });
+  } catch {
+    // Non-critical — don't fail the payment flow
+  }
+};
+
 export class PaymentService {
   static async createOrder(params: { userId: string; bookingId: string }) {
     const booking = await prisma.booking.findUnique({
@@ -10,6 +34,7 @@ export class PaymentService {
       select: {
         id: true,
         customerId: true,
+        driverId: true,
         totalAmount: true,
         paymentStatus: true,
         paymentMethod: true,
@@ -20,7 +45,10 @@ export class PaymentService {
       throw new AppError('Booking not found', 404);
     }
 
-    if (String(booking.customerId) !== String(params.userId)) {
+    // Allow both customer and assigned driver to create the order
+    const isCustomer = String(booking.customerId) === String(params.userId);
+    const isDriver = booking.driverId && String(booking.driverId) === String(params.userId);
+    if (!isCustomer && !isDriver) {
       throw new AppError('Not authorized for this booking', 403);
     }
 
@@ -171,6 +199,11 @@ export class PaymentService {
       return { alreadyPaid: false, paymentId: payment.id };
     });
 
+    // Credit driver wallet for online payment
+    if (!result.alreadyPaid) {
+      await creditDriverForBooking(booking.id);
+    }
+
     return {
       bookingId: booking.id,
       paymentStatus: PaymentStatus.PAID,
@@ -236,6 +269,12 @@ export class PaymentService {
             },
           });
         }
+
+        // Credit driver wallet for online payment
+        if (payment.bookingId) {
+          // Run outside transaction to avoid blocking
+          setTimeout(() => creditDriverForBooking(payment.bookingId!), 100);
+        }
       });
     }
 
@@ -245,14 +284,16 @@ export class PaymentService {
   static async getBookingPaymentStatus(params: { userId: string; bookingId: string }) {
     const booking = await prisma.booking.findUnique({
       where: { id: params.bookingId },
-      select: { id: true, customerId: true, paymentStatus: true, paymentMethod: true, paymentId: true },
+      select: { id: true, customerId: true, driverId: true, paymentStatus: true, paymentMethod: true, paymentId: true },
     });
 
     if (!booking) {
       throw new AppError('Booking not found', 404);
     }
 
-    if (String(booking.customerId) !== String(params.userId)) {
+    const isCust = String(booking.customerId) === String(params.userId);
+    const isDrv = booking.driverId && String(booking.driverId) === String(params.userId);
+    if (!isCust && !isDrv) {
       throw new AppError('Not authorized for this booking', 403);
     }
 

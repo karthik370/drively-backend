@@ -8,8 +8,8 @@ router.post('/webhook/cashfree', PaymentController.cashfreeWebhook);
 
 router.use(authenticate);
 
-router.post('/orders', requireCustomerOrOfflineDriver, PaymentController.createOrder);
+router.post('/orders', PaymentController.createOrder);
 router.post('/verify', requireCustomerOrOfflineDriver, PaymentController.verifyPayment);
-router.get('/status/:bookingId', requireCustomerOrOfflineDriver, PaymentController.getBookingPaymentStatus);
+router.get('/status/:bookingId', PaymentController.getBookingPaymentStatus);
 
 export default router;

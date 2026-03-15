@@ -550,7 +550,7 @@ export class BookingService {
           platformCommission,
           driverEarnings,
           commissionPercentage,
-          paymentMethod: PaymentMethod.CASH,
+          paymentMethod: params.paymentMethod || PaymentMethod.CASH,
           paymentStatus: PaymentStatus.PENDING,
           matchAttempts: 0,
           rejectedDriverIds: [],
