@@ -4,17 +4,45 @@
  * Handles automatic money transfers to drivers via
  * Cashfree Payouts V2 API (Standard Transfer).
  *
- * Auth: x-client-id + x-client-secret + X-Cf-Signature (RSA public key 2FA)
+ * V2 Docs: https://docs.cashfree.com/docs/payouts-standard-transfer
  *
- * Separate from cashfree.ts (Payment Gateway for collecting money).
- * This service is for SENDING money to drivers.
+ * Auth Headers:
+ *   x-client-id      → Client ID from Cashfree Dashboard
+ *   x-client-secret   → Client Secret from Cashfree Dashboard
+ *   X-Cf-Signature    → RSA encrypted "clientId.unixTimestamp" (public key 2FA)
+ *   x-api-version     → "2024-01-01"
+ *
+ * Endpoints:
+ *   POST   /payout/transfers              → Create a transfer
+ *   GET    /payout/transfers/:transferId   → Get transfer status
+ *
+ * Base URLs:
+ *   Test:  https://sandbox.cashfree.com/payout
+ *   Prod:  https://api.cashfree.com/payout
+ *
+ * transfer_mode valid values (lowercase):
+ *   "banktransfer" | "upi" | "imps" | "neft" | "rtgs" | "card"
+ *
+ * beneficiary_details structure:
+ *   {
+ *     beneficiary_id: string (unique per beneficiary)
+ *     beneficiary_name: string
+ *     beneficiary_phone: string (10 digits)
+ *     beneficiary_email: string
+ *     beneficiary_instrument_details: {
+ *       // For bank: bank_account_number + bank_ifsc
+ *       // For UPI:  vpa
+ *     }
+ *   }
  */
 import axios from 'axios';
 import crypto from 'crypto';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 
-// ── Config ─────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// Config
+// ────────────────────────────────────────────────────────────────────────────
 
 const getPayoutConfig = () => {
   const clientId = process.env.CASHFREE_PAYOUT_CLIENT_ID;
@@ -23,12 +51,11 @@ const getPayoutConfig = () => {
 
   if (!clientId || !clientSecret) {
     throw new AppError(
-      'Cashfree Payout credentials are not configured (CASHFREE_PAYOUT_CLIENT_ID / CASHFREE_PAYOUT_CLIENT_SECRET)',
+      'Cashfree Payout credentials not configured. Set CASHFREE_PAYOUT_CLIENT_ID and CASHFREE_PAYOUT_CLIENT_SECRET.',
       500,
     );
   }
 
-  // V2 base URLs
   const baseUrl =
     env === 'PRODUCTION'
       ? 'https://api.cashfree.com/payout'
@@ -37,42 +64,43 @@ const getPayoutConfig = () => {
   return { clientId, clientSecret, env, baseUrl };
 };
 
-// ── RSA Signature for Public Key 2FA ───────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// RSA Signature (Public Key 2FA)
+// ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Generate X-Cf-Signature using RSA public key encryption.
- * Encrypts "clientId.unixTimestamp" with the public key PEM.
- * Required because user has enabled Public Key 2FA on Cashfree dashboard.
+ * Generate X-Cf-Signature header value.
+ * Encrypts "clientId.unixTimestamp" with the RSA public key PEM.
+ * Valid for 10 min (test) / 5 min (production).
  */
 const generateCfSignature = (clientId: string): string => {
   const rawKey = process.env.CASHFREE_PAYOUT_PUBLIC_KEY;
   if (!rawKey) {
-    throw new AppError(
-      'CASHFREE_PAYOUT_PUBLIC_KEY is not set.',
-      500,
-    );
+    throw new AppError('CASHFREE_PAYOUT_PUBLIC_KEY env var is not set.', 500);
   }
 
-  // dotenv stores \n as literal "\\n" — convert to real newlines for valid PEM
+  // dotenv stores newlines as literal "\\n" — convert to real newlines for PEM
   const publicKeyPem = rawKey.replace(/\\n/g, '\n');
 
   const timestamp = Math.floor(Date.now() / 1000);
-  const dataToSign = `${clientId}.${timestamp}`;
+  const payload = `${clientId}.${timestamp}`;
 
   const encrypted = crypto.publicEncrypt(
     {
       key: publicKeyPem,
       padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
     },
-    Buffer.from(dataToSign),
+    Buffer.from(payload),
   );
 
   return encrypted.toString('base64');
 };
 
-/**
- * Get V2 auth headers including RSA signature for 2FA.
- */
+// ────────────────────────────────────────────────────────────────────────────
+// V2 Headers
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Build complete auth headers for every Cashfree V2 request. */
 const getV2Headers = () => {
   const { clientId, clientSecret } = getPayoutConfig();
   const signature = generateCfSignature(clientId);
@@ -86,60 +114,93 @@ const getV2Headers = () => {
   };
 };
 
-// ── Standard Transfer (V2) ─────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// Types
+// ────────────────────────────────────────────────────────────────────────────
 
 export interface PayoutTransferParams {
-  transferId: string;
-  amount: number;
+  transferId: string;         // Must be unique, never reuse even for retries
+  amount: number;             // In INR (e.g. 500.00)
   transferMode: 'upi' | 'banktransfer' | 'imps' | 'neft';
-  beneName: string;
-  benePhone: string;
-  beneEmail?: string;
-  beneVpa?: string;
-  beneBankAccount?: string;
-  beneIfsc?: string;
+  // Beneficiary info
+  beneName: string;           // Full name
+  benePhone: string;          // 10-digit phone number
+  beneEmail?: string;         // Optional email
+  // UPI (required when transferMode is 'upi')
+  beneVpa?: string;           // e.g. "name@upi"
+  // Bank (required when transferMode is 'banktransfer' | 'imps' | 'neft')
+  beneBankAccount?: string;   // Account number
+  beneIfsc?: string;          // IFSC code
   remarks?: string;
 }
 
 export interface PayoutTransferResult {
-  status: string;
-  referenceId?: string;
+  status: string;             // "SUCCESS" | "PENDING" | "ERROR" | "REVERSED" | "FAILED"
+  referenceId?: string;       // Cashfree's cf_transfer_id
   subCode?: string;
   message?: string;
-  acknowledged?: number;
 }
 
-/**
- * Initiate a standard transfer to a beneficiary.
- * POST /payout/transfers (V2 API)
- */
+export interface PayoutTransferStatus {
+  status: string;
+  referenceId?: string;
+  reason?: string;
+  transferMode?: string;
+  amount?: number;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Create Transfer — POST /payout/transfers
+// ────────────────────────────────────────────────────────────────────────────
+
 export const initiatePayoutTransfer = async (
   params: PayoutTransferParams,
 ): Promise<PayoutTransferResult> => {
   const { baseUrl } = getPayoutConfig();
   const headers = getV2Headers();
 
-  const beneficiary: any = {
-    beneficiary_id: `bene_${params.transferId}`,
-    beneficiary_name: params.beneName,
-    beneficiary_phone: params.benePhone,
-    beneficiary_email: params.beneEmail || 'driver@drivemate.app',
-  };
+  // Build beneficiary_instrument_details based on transfer mode
+  const instrumentDetails: Record<string, string> = {};
 
   if (params.transferMode === 'upi') {
-    beneficiary.beneficiary_vpa = params.beneVpa;
+    if (!params.beneVpa) {
+      return { status: 'ERROR', message: 'UPI VPA (beneVpa) is required for UPI transfers' };
+    }
+    instrumentDetails.vpa = params.beneVpa;
   } else {
-    beneficiary.beneficiary_account_number = params.beneBankAccount;
-    beneficiary.beneficiary_ifsc = params.beneIfsc;
+    // banktransfer / imps / neft
+    if (!params.beneBankAccount || !params.beneIfsc) {
+      return { status: 'ERROR', message: 'Bank account number and IFSC are required for bank transfers' };
+    }
+    instrumentDetails.bank_account_number = params.beneBankAccount;
+    instrumentDetails.bank_ifsc = params.beneIfsc;
   }
 
+  // Sanitize phone to 10 digits
+  const phone = (params.benePhone || '').replace(/\D/g, '').slice(-10);
+
+  // V2 request body — exactly as per Cashfree docs
   const body = {
     transfer_id: params.transferId,
     transfer_amount: params.amount,
-    transfer_mode: params.transferMode === 'upi' ? 'UPI' : 'BANKTRANSFER',
+    transfer_mode: params.transferMode,  // lowercase: "upi" | "banktransfer" | "imps" | "neft"
     remarks: params.remarks || 'DriveMate driver withdrawal',
-    beneficiary_details: beneficiary,
+    beneficiary_details: {
+      beneficiary_id: `bene_${params.transferId}`,
+      beneficiary_name: params.beneName || 'DriveMate Driver',
+      beneficiary_phone: phone || '9999999999',
+      beneficiary_email: params.beneEmail || 'driver@drivemate.app',
+      beneficiary_instrument_details: instrumentDetails,
+    },
   };
+
+  logger.info('Cashfree V2 transfer request', {
+    transferId: params.transferId,
+    amount: params.amount,
+    mode: params.transferMode,
+    url: `${baseUrl}/transfers`,
+    body: JSON.stringify(body),
+  });
 
   try {
     const res = await axios.post(`${baseUrl}/transfers`, body, {
@@ -149,57 +210,43 @@ export const initiatePayoutTransfer = async (
 
     const resData = res.data;
 
-    logger.info('Cashfree Payout V2 transfer response', {
+    logger.info('Cashfree V2 transfer response', {
       transferId: params.transferId,
-      status: resData?.status,
-      message: resData?.message,
-      cfTransferId: resData?.cf_transfer_id,
+      httpStatus: res.status,
       fullBody: JSON.stringify(resData),
     });
 
     return {
-      status: resData?.status || 'ERROR',
+      status: resData?.status || 'PENDING',
       referenceId: resData?.cf_transfer_id?.toString() || resData?.transfer_id || undefined,
-      message: resData?.message || undefined,
+      message: resData?.message || resData?.status_description || undefined,
     };
   } catch (err: any) {
     const errData = err?.response?.data;
-    logger.error('Cashfree Payout V2 transfer error', {
+    const httpStatus = err?.response?.status;
+
+    logger.error('Cashfree V2 transfer error', {
       transferId: params.transferId,
-      status: err?.response?.status,
-      error: JSON.stringify(errData) || err?.message,
+      httpStatus,
+      type: errData?.type,
+      code: errData?.code,
+      message: errData?.message,
+      fullError: JSON.stringify(errData),
     });
 
-    if (errData) {
-      return {
-        status: 'ERROR',
-        subCode: String(err?.response?.status || ''),
-        message: errData?.message || errData?.error || 'Transfer failed',
-      };
-    }
-
-    throw new AppError(
-      errData?.message || 'Failed to initiate payout transfer',
-      500,
-    );
+    // Return structured error instead of throwing
+    return {
+      status: 'ERROR',
+      subCode: errData?.code || String(httpStatus || ''),
+      message: errData?.message || 'Transfer failed — check logs for details',
+    };
   }
 };
 
-// ── Get Transfer Status (V2) ───────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// Get Transfer Status — GET /payout/transfers/:transferId
+// ────────────────────────────────────────────────────────────────────────────
 
-export interface PayoutTransferStatus {
-  status: string;
-  referenceId?: string;
-  reason?: string;
-  acknowledged?: number;
-  transferMode?: string;
-  amount?: number;
-}
-
-/**
- * Get the status of a previously initiated transfer.
- * GET /payout/transfers/:transferId (V2 API)
- */
 export const getPayoutTransferStatus = async (
   transferId: string,
 ): Promise<PayoutTransferStatus> => {
@@ -218,14 +265,13 @@ export const getPayoutTransferStatus = async (
       status: data?.status || 'UNKNOWN',
       referenceId: data?.cf_transfer_id?.toString() || undefined,
       reason: data?.status_description || undefined,
-      acknowledged: data?.status === 'SUCCESS' ? 1 : 0,
       transferMode: data?.transfer_mode || undefined,
       amount: data?.transfer_amount ? Number(data.transfer_amount) : undefined,
     };
   } catch (err: any) {
-    logger.error('Cashfree Payout V2 getTransferStatus error', {
+    logger.error('Cashfree V2 getTransferStatus error', {
       transferId,
-      error: err?.response?.data || err?.message,
+      error: JSON.stringify(err?.response?.data) || err?.message,
     });
     throw new AppError('Failed to get payout transfer status', 500);
   }
