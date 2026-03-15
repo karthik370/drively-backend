@@ -150,25 +150,73 @@ export interface PayoutTransferStatus {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Create Beneficiary — POST /payout/beneficiaries
+// V2 requires beneficiary to exist BEFORE initiating a transfer.
+// ────────────────────────────────────────────────────────────────────────────
+
+const createBeneficiary = async (
+  baseUrl: string,
+  beneficiaryId: string,
+  name: string,
+  phone: string,
+  email: string,
+  instrumentDetails: Record<string, string>,
+): Promise<{ success: boolean; message?: string }> => {
+  const headers = getV2Headers();
+
+  const body = {
+    beneficiary_id: beneficiaryId,
+    beneficiary_name: name || 'DriveMate Driver',
+    beneficiary_phone: phone || '9999999999',
+    beneficiary_email: email || 'driver@drivemate.app',
+    beneficiary_instrument_details: instrumentDetails,
+  };
+
+  try {
+    await axios.post(`${baseUrl}/beneficiaries`, body, {
+      headers,
+      timeout: 15_000,
+    });
+    logger.info('Cashfree V2 beneficiary created', { beneficiaryId });
+    return { success: true };
+  } catch (err: any) {
+    const status = err?.response?.status;
+    const errData = err?.response?.data;
+
+    // 409 = beneficiary already exists — that's fine, proceed with transfer
+    if (status === 409) {
+      logger.info('Cashfree V2 beneficiary already exists, proceeding', { beneficiaryId });
+      return { success: true };
+    }
+
+    logger.error('Cashfree V2 create beneficiary error', {
+      beneficiaryId,
+      httpStatus: status,
+      error: JSON.stringify(errData),
+    });
+    return { success: false, message: errData?.message || 'Failed to create beneficiary' };
+  }
+};
+
+// ────────────────────────────────────────────────────────────────────────────
 // Create Transfer — POST /payout/transfers
+// Flow: Create beneficiary → Then initiate transfer
 // ────────────────────────────────────────────────────────────────────────────
 
 export const initiatePayoutTransfer = async (
   params: PayoutTransferParams,
 ): Promise<PayoutTransferResult> => {
   const { baseUrl } = getPayoutConfig();
-  const headers = getV2Headers();
 
   // Build beneficiary_instrument_details based on transfer mode
   const instrumentDetails: Record<string, string> = {};
 
   if (params.transferMode === 'upi') {
     if (!params.beneVpa) {
-      return { status: 'ERROR', message: 'UPI VPA (beneVpa) is required for UPI transfers' };
+      return { status: 'ERROR', message: 'UPI VPA is required for UPI transfers' };
     }
     instrumentDetails.vpa = params.beneVpa;
   } else {
-    // banktransfer / imps / neft
     if (!params.beneBankAccount || !params.beneIfsc) {
       return { status: 'ERROR', message: 'Bank account number and IFSC are required for bank transfers' };
     }
@@ -178,19 +226,32 @@ export const initiatePayoutTransfer = async (
 
   // Sanitize phone to 10 digits
   const phone = (params.benePhone || '').replace(/\D/g, '').slice(-10);
+  const beneficiaryId = `bene_${params.transferId}`;
 
-  // V2 request body — exactly as per Cashfree docs
+  // ── Step 1: Create beneficiary ──
+  const beneResult = await createBeneficiary(
+    baseUrl,
+    beneficiaryId,
+    params.beneName,
+    phone,
+    params.beneEmail || 'driver@drivemate.app',
+    instrumentDetails,
+  );
+
+  if (!beneResult.success) {
+    return { status: 'ERROR', message: beneResult.message || 'Failed to register beneficiary' };
+  }
+
+  // ── Step 2: Initiate transfer ──
+  const headers = getV2Headers();
+
   const body = {
     transfer_id: params.transferId,
     transfer_amount: params.amount,
-    transfer_mode: params.transferMode,  // lowercase: "upi" | "banktransfer" | "imps" | "neft"
+    transfer_mode: params.transferMode,
     remarks: params.remarks || 'DriveMate driver withdrawal',
     beneficiary_details: {
-      beneficiary_id: `bene_${params.transferId}`,
-      beneficiary_name: params.beneName || 'DriveMate Driver',
-      beneficiary_phone: phone || '9999999999',
-      beneficiary_email: params.beneEmail || 'driver@drivemate.app',
-      beneficiary_instrument_details: instrumentDetails,
+      beneficiary_id: beneficiaryId,
     },
   };
 
@@ -198,7 +259,7 @@ export const initiatePayoutTransfer = async (
     transferId: params.transferId,
     amount: params.amount,
     mode: params.transferMode,
-    url: `${baseUrl}/transfers`,
+    beneficiaryId,
     body: JSON.stringify(body),
   });
 
