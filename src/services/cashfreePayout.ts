@@ -202,6 +202,9 @@ export const initiatePayoutTransfer = async (
       transferId: params.transferId,
       status: resData?.status,
       subCode: resData?.subCode,
+      message: resData?.message,
+      data: resData?.data,
+      fullBody: JSON.stringify(resData),
     });
 
     return {
