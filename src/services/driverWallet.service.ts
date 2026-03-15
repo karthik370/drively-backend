@@ -1,5 +1,7 @@
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
+import { initiatePayoutTransfer } from './cashfreePayout';
+import { logger } from '../utils/logger';
 
 export class DriverWalletService {
     /**
@@ -169,7 +171,7 @@ export class DriverWalletService {
         userId: string,
         amount: number,
         method: 'BANK' | 'UPI'
-    ): Promise<{ payoutId: string; status: string }> {
+    ): Promise<{ payoutId: string; status: string; message?: string }> {
         const profile = await prisma.driverProfile.findUnique({
             where: { userId },
             select: {
@@ -227,7 +229,68 @@ export class DriverWalletService {
             },
         });
 
-        return { payoutId: payout.id, status: 'PENDING' };
+        // Fetch driver name and phone for Cashfree
+        const user = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { firstName: true, lastName: true, phoneNumber: true, email: true },
+        });
+
+        const beneName = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : 'Driver';
+        const benePhone = user?.phoneNumber || '9999999999';
+        const beneEmail = user?.email || undefined;
+
+        // Initiate transfer via Cashfree Payouts
+        try {
+            const transferId = `PAY_${payout.id.replace(/-/g, '').slice(0, 30)}`;
+
+            const result = await initiatePayoutTransfer({
+                transferId,
+                amount,
+                transferMode: method === 'UPI' ? 'upi' : 'banktransfer',
+                beneName,
+                benePhone,
+                beneEmail,
+                beneVpa: method === 'UPI' ? (profile.upiId || undefined) : undefined,
+                beneBankAccount: method === 'BANK' ? (profile.bankAccountNumber || undefined) : undefined,
+                beneIfsc: method === 'BANK' ? (profile.bankIfscCode || undefined) : undefined,
+                remarks: `DriveMate withdrawal - ${payout.id}`,
+            });
+
+            if (result.status === 'SUCCESS' || result.status === 'PENDING') {
+                // Cashfree accepted the transfer
+                await prisma.driverPayout.update({
+                    where: { id: payout.id },
+                    data: {
+                        status: 'PROCESSING',
+                        transactionRef: result.referenceId || transferId,
+                    },
+                });
+                return { payoutId: payout.id, status: 'PROCESSING', message: 'Transfer initiated successfully' };
+            } else {
+                // Cashfree rejected the transfer
+                await prisma.driverPayout.update({
+                    where: { id: payout.id },
+                    data: {
+                        status: 'FAILED',
+                        failureReason: result.message || 'Transfer rejected by payment provider',
+                    },
+                });
+                return { payoutId: payout.id, status: 'FAILED', message: result.message || 'Transfer failed' };
+            }
+        } catch (err: any) {
+            logger.error('Cashfree payout initiation failed', { payoutId: payout.id, error: err?.message });
+
+            // Mark as FAILED in DB
+            await prisma.driverPayout.update({
+                where: { id: payout.id },
+                data: {
+                    status: 'FAILED',
+                    failureReason: err?.message || 'Transfer initiation failed',
+                },
+            });
+
+            return { payoutId: payout.id, status: 'FAILED', message: err?.message || 'Transfer failed' };
+        }
     }
 
     /**
