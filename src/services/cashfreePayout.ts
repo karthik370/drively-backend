@@ -4,16 +4,23 @@
  * Handles automatic money transfers to drivers via
  * Cashfree Payouts V2 API (Standard Transfer).
  *
- * V2 Docs: https://docs.cashfree.com/docs/payouts-standard-transfer
+ * Flow:
+ *   1. Create beneficiary (POST /payout/beneficiary)
+ *      - If 409 (already exists) and details changed → delete + recreate
+ *   2. Poll beneficiary status until VERIFIED (GET /payout/beneficiary/:id)
+ *   3. Initiate transfer (POST /payout/transfers)
  *
  * Auth Headers:
  *   x-client-id      → Client ID from Cashfree Dashboard
- *   x-client-secret   → Client Secret from Cashfree Dashboard
- *   X-Cf-Signature    → RSA encrypted "clientId.unixTimestamp" (public key 2FA)
- *   x-api-version     → "2024-01-01"
+ *   x-client-secret  → Client Secret from Cashfree Dashboard
+ *   X-Cf-Signature   → RSA encrypted "clientId.unixTimestamp" (public key 2FA)
+ *   x-api-version    → "2024-01-01"
  *
  * Endpoints:
- *   POST   /payout/transfers              → Create a transfer
+ *   POST   /payout/beneficiary             → Create a beneficiary (singular!)
+ *   GET    /payout/beneficiary/:id         → Get beneficiary status
+ *   DELETE /payout/beneficiary/:id         → Remove beneficiary (for re-creation)
+ *   POST   /payout/transfers               → Create a transfer (plural!)
  *   GET    /payout/transfers/:transferId   → Get transfer status
  *
  * Base URLs:
@@ -23,17 +30,9 @@
  * transfer_mode valid values (lowercase):
  *   "banktransfer" | "upi" | "imps" | "neft" | "rtgs" | "card"
  *
- * beneficiary_details structure:
- *   {
- *     beneficiary_id: string (unique per beneficiary)
- *     beneficiary_name: string
- *     beneficiary_phone: string (10 digits)
- *     beneficiary_email: string
- *     beneficiary_instrument_details: {
- *       // For bank: bank_account_number + bank_ifsc
- *       // For UPI:  vpa
- *     }
- *   }
+ * Sandbox test VPAs:
+ *   "success@upi" → verifies successfully
+ *   "failure@upi" → fails verification
  */
 import axios from 'axios';
 import crypto from 'crypto';
@@ -68,28 +67,18 @@ const getPayoutConfig = () => {
 // RSA Signature (Public Key 2FA)
 // ────────────────────────────────────────────────────────────────────────────
 
-/**
- * Generate X-Cf-Signature header value.
- * Encrypts "clientId.unixTimestamp" with the RSA public key PEM.
- * Valid for 10 min (test) / 5 min (production).
- */
 const generateCfSignature = (clientId: string): string => {
   const rawKey = process.env.CASHFREE_PAYOUT_PUBLIC_KEY;
   if (!rawKey) {
     throw new AppError('CASHFREE_PAYOUT_PUBLIC_KEY env var is not set.', 500);
   }
 
-  // dotenv stores newlines as literal "\\n" — convert to real newlines for PEM
   const publicKeyPem = rawKey.replace(/\\n/g, '\n');
-
   const timestamp = Math.floor(Date.now() / 1000);
   const payload = `${clientId}.${timestamp}`;
 
   const encrypted = crypto.publicEncrypt(
-    {
-      key: publicKeyPem,
-      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-    },
+    { key: publicKeyPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING },
     Buffer.from(payload),
   );
 
@@ -97,18 +86,15 @@ const generateCfSignature = (clientId: string): string => {
 };
 
 // ────────────────────────────────────────────────────────────────────────────
-// V2 Headers
+// V2 Headers (fresh signature each call)
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Build complete auth headers for every Cashfree V2 request. */
 const getV2Headers = () => {
   const { clientId, clientSecret } = getPayoutConfig();
-  const signature = generateCfSignature(clientId);
-
   return {
     'x-client-id': clientId,
     'x-client-secret': clientSecret,
-    'X-Cf-Signature': signature,
+    'X-Cf-Signature': generateCfSignature(clientId),
     'x-api-version': '2024-01-01',
     'Content-Type': 'application/json',
   };
@@ -119,24 +105,21 @@ const getV2Headers = () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 export interface PayoutTransferParams {
-  transferId: string;         // Must be unique, never reuse even for retries
-  amount: number;             // In INR (e.g. 500.00)
+  transferId: string;
+  amount: number;
   transferMode: 'upi' | 'banktransfer' | 'imps' | 'neft';
-  // Beneficiary info
-  beneName: string;           // Full name
-  benePhone: string;          // 10-digit phone number
-  beneEmail?: string;         // Optional email
-  // UPI (required when transferMode is 'upi')
-  beneVpa?: string;           // e.g. "name@upi"
-  // Bank (required when transferMode is 'banktransfer' | 'imps' | 'neft')
-  beneBankAccount?: string;   // Account number
-  beneIfsc?: string;          // IFSC code
+  beneName: string;
+  benePhone: string;
+  beneEmail?: string;
+  beneVpa?: string;
+  beneBankAccount?: string;
+  beneIfsc?: string;
   remarks?: string;
 }
 
 export interface PayoutTransferResult {
-  status: string;             // "SUCCESS" | "PENDING" | "ERROR" | "REVERSED" | "FAILED"
-  referenceId?: string;       // Cashfree's cf_transfer_id
+  status: string;
+  referenceId?: string;
   subCode?: string;
   message?: string;
 }
@@ -150,10 +133,10 @@ export interface PayoutTransferStatus {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Create Beneficiary — POST /payout/beneficiaries
-// V2 requires beneficiary to exist BEFORE initiating a transfer.
+// Beneficiary Management — POST/GET/DELETE /payout/beneficiary
 // ────────────────────────────────────────────────────────────────────────────
 
+/** Create a beneficiary. Returns success=true if created or already exists. */
 const createBeneficiary = async (
   baseUrl: string,
   beneficiaryId: string,
@@ -161,9 +144,7 @@ const createBeneficiary = async (
   phone: string,
   email: string,
   instrumentDetails: Record<string, string>,
-): Promise<{ success: boolean; message?: string }> => {
-  const headers = getV2Headers();
-
+): Promise<{ success: boolean; alreadyExists?: boolean; message?: string }> => {
   const body = {
     beneficiary_id: beneficiaryId,
     beneficiary_name: name || 'DriveMate Driver',
@@ -173,20 +154,24 @@ const createBeneficiary = async (
   };
 
   try {
-    await axios.post(`${baseUrl}/beneficiaries`, body, {
-      headers,
+    const res = await axios.post(`${baseUrl}/beneficiary`, body, {
+      headers: getV2Headers(),
       timeout: 15_000,
     });
-    logger.info('Cashfree V2 beneficiary created', { beneficiaryId });
-    return { success: true };
+    logger.info('Cashfree V2 beneficiary created', {
+      beneficiaryId,
+      httpStatus: res.status,
+      response: JSON.stringify(res.data),
+    });
+    return { success: true, alreadyExists: false };
   } catch (err: any) {
     const status = err?.response?.status;
     const errData = err?.response?.data;
 
-    // 409 = beneficiary already exists — that's fine, proceed with transfer
+    // 409 = already exists — fine, will reuse
     if (status === 409) {
-      logger.info('Cashfree V2 beneficiary already exists, proceeding', { beneficiaryId });
-      return { success: true };
+      logger.info('Cashfree V2 beneficiary already exists', { beneficiaryId });
+      return { success: true, alreadyExists: true };
     }
 
     logger.error('Cashfree V2 create beneficiary error', {
@@ -198,19 +183,76 @@ const createBeneficiary = async (
   }
 };
 
+/** Delete a beneficiary (to recreate with updated UPI/Bank details). */
+const deleteBeneficiary = async (baseUrl: string, beneficiaryId: string): Promise<boolean> => {
+  try {
+    await axios.delete(`${baseUrl}/beneficiary/${beneficiaryId}`, {
+      headers: getV2Headers(),
+      timeout: 10_000,
+    });
+    logger.info('Cashfree V2 beneficiary deleted', { beneficiaryId });
+    return true;
+  } catch (err: any) {
+    logger.warn('Cashfree V2 delete beneficiary failed (non-fatal)', {
+      beneficiaryId,
+      error: err?.response?.data?.message || err?.message,
+    });
+    return false;
+  }
+};
+
 // ────────────────────────────────────────────────────────────────────────────
-// Create Transfer — POST /payout/transfers
-// Flow: Create/reuse beneficiary → Wait for propagation → Initiate transfer
+// Poll Beneficiary Status — wait until VERIFIED
 // ────────────────────────────────────────────────────────────────────────────
 
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const waitForBeneficiaryVerified = async (
+  baseUrl: string,
+  beneficiaryId: string,
+  maxAttempts = 10,
+  intervalMs = 2000,
+): Promise<boolean> => {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await axios.get(`${baseUrl}/beneficiary/${beneficiaryId}`, {
+        headers: getV2Headers(),
+        timeout: 10_000,
+      });
+
+      const beneStatus = res.data?.beneficiary_status;
+      logger.info('Cashfree beneficiary status check', { beneficiaryId, beneStatus, attempt });
+
+      if (beneStatus === 'VERIFIED') return true;
+      if (['INVALID', 'FAILED', 'CANCELLED', 'DELETED'].includes(beneStatus)) {
+        logger.error('Cashfree beneficiary verification failed', { beneficiaryId, beneStatus });
+        return false;
+      }
+      // INITIATED — keep polling
+    } catch (err: any) {
+      logger.warn('Cashfree beneficiary status check error', {
+        beneficiaryId,
+        attempt,
+        error: err?.response?.data?.message || err?.message,
+      });
+    }
+
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+
+  logger.error('Cashfree beneficiary VERIFIED timeout after max attempts', { beneficiaryId, maxAttempts });
+  return false;
+};
+
+// ────────────────────────────────────────────────────────────────────────────
+// Create Transfer — POST /payout/transfers
+// Full flow: Create/reuse beneficiary → Poll VERIFIED → Transfer
+// ────────────────────────────────────────────────────────────────────────────
 
 export const initiatePayoutTransfer = async (
   params: PayoutTransferParams,
 ): Promise<PayoutTransferResult> => {
   const { baseUrl } = getPayoutConfig();
 
-  // Build beneficiary_instrument_details based on transfer mode
+  // Build beneficiary_instrument_details
   const instrumentDetails: Record<string, string> = {};
 
   if (params.transferMode === 'upi') {
@@ -220,49 +262,66 @@ export const initiatePayoutTransfer = async (
     instrumentDetails.vpa = params.beneVpa;
   } else {
     if (!params.beneBankAccount || !params.beneIfsc) {
-      return { status: 'ERROR', message: 'Bank account number and IFSC are required for bank transfers' };
+      return { status: 'ERROR', message: 'Bank account number and IFSC are required' };
     }
     instrumentDetails.bank_account_number = params.beneBankAccount;
     instrumentDetails.bank_ifsc = params.beneIfsc;
   }
 
-  // Sanitize and validate phone to 10 digits
+  // Validate phone
   const phone = (params.benePhone || '').replace(/\D/g, '').slice(-10);
   if (phone.length !== 10) {
     return { status: 'ERROR', message: 'Invalid phone number — must be 10 digits' };
   }
 
-  // Use a STABLE beneficiary ID per driver (not per transfer)
-  // This way the beneficiary is created once and reused for all future payouts
+  // Stable beneficiary ID per driver phone
   const beneficiaryId = `bene_driver_${phone}`;
 
   // ── Step 1: Create or reuse beneficiary ──
   const beneResult = await createBeneficiary(
-    baseUrl,
-    beneficiaryId,
-    params.beneName,
-    phone,
-    params.beneEmail || 'driver@drivemate.app',
-    instrumentDetails,
+    baseUrl, beneficiaryId, params.beneName, phone,
+    params.beneEmail || 'driver@drivemate.app', instrumentDetails,
   );
 
-  if (!beneResult.success) {
+  // If already exists, driver may have changed UPI/bank details →
+  // delete old beneficiary and recreate with new details
+  if (beneResult.alreadyExists) {
+    logger.info('Beneficiary exists — deleting and recreating with latest details', { beneficiaryId });
+    await deleteBeneficiary(baseUrl, beneficiaryId);
+    // Small wait for deletion propagation
+    await new Promise(r => setTimeout(r, 1000));
+
+    const recreateResult = await createBeneficiary(
+      baseUrl, beneficiaryId, params.beneName, phone,
+      params.beneEmail || 'driver@drivemate.app', instrumentDetails,
+    );
+
+    if (!recreateResult.success) {
+      return { status: 'ERROR', message: recreateResult.message || 'Failed to update beneficiary details' };
+    }
+  }
+
+  if (!beneResult.success && !beneResult.alreadyExists) {
     return { status: 'ERROR', message: beneResult.message || 'Failed to register beneficiary' };
   }
 
-  // Wait for Cashfree to propagate the beneficiary (2 seconds)
-  await delay(2000);
+  // ── Step 2: Poll until beneficiary is VERIFIED ──
+  const isVerified = await waitForBeneficiaryVerified(baseUrl, beneficiaryId);
+  if (!isVerified) {
+    return {
+      status: 'ERROR',
+      message: 'Beneficiary verification failed or timed out. Please check your UPI ID / bank details and try again.',
+    };
+  }
 
-  // ── Step 2: Initiate transfer — ONLY beneficiary_id, no other fields ──
-  const headers = getV2Headers();
-
+  // ── Step 3: Initiate transfer — ONLY beneficiary_id ──
   const body = {
     transfer_id: params.transferId,
     transfer_amount: params.amount,
     transfer_mode: params.transferMode,
     remarks: params.remarks || 'DriveMate driver withdrawal',
     beneficiary_details: {
-      beneficiary_id: beneficiaryId,  // ONLY the id — no other fields
+      beneficiary_id: beneficiaryId,
     },
   };
 
@@ -271,12 +330,11 @@ export const initiatePayoutTransfer = async (
     amount: params.amount,
     mode: params.transferMode,
     beneficiaryId,
-    body: JSON.stringify(body),
   });
 
   try {
     const res = await axios.post(`${baseUrl}/transfers`, body, {
-      headers,
+      headers: getV2Headers(),
       timeout: 30_000,
     });
 
@@ -306,7 +364,6 @@ export const initiatePayoutTransfer = async (
       fullError: JSON.stringify(errData),
     });
 
-    // Return structured error instead of throwing
     return {
       status: 'ERROR',
       subCode: errData?.code || String(httpStatus || ''),
@@ -323,11 +380,10 @@ export const getPayoutTransferStatus = async (
   transferId: string,
 ): Promise<PayoutTransferStatus> => {
   const { baseUrl } = getPayoutConfig();
-  const headers = getV2Headers();
 
   try {
     const res = await axios.get(`${baseUrl}/transfers/${transferId}`, {
-      headers,
+      headers: getV2Headers(),
       timeout: 15_000,
     });
 
