@@ -136,7 +136,7 @@ const createBeneficiary = async (
   phone: string,
   email: string,
   instrumentDetails: Record<string, string>,
-): Promise<{ success: boolean; alreadyExists?: boolean; message?: string }> => {
+): Promise<{ success: boolean; alreadyExists?: boolean; alreadyVerified?: boolean; message?: string }> => {
   const body = {
     beneficiary_id: beneficiaryId,
     beneficiary_name: name || 'DriveMate Driver',
@@ -150,19 +150,25 @@ const createBeneficiary = async (
       headers: getV2Headers(),
       timeout: 15_000,
     });
+    // Check if already VERIFIED in the create response — skip polling if so
+    const createdStatus = res.data?.beneficiary_status;
+    const alreadyVerified = createdStatus === 'VERIFIED';
     logger.info('Cashfree V2 beneficiary created', {
       beneficiaryId,
       httpStatus: res.status,
+      beneficiary_status: createdStatus,
+      alreadyVerified,
       response: JSON.stringify(res.data),
     });
-    return { success: true, alreadyExists: false };
+    return { success: true, alreadyExists: false, alreadyVerified };
   } catch (err: any) {
     const status = err?.response?.status;
     const errData = err?.response?.data;
 
     if (status === 409) {
       logger.info('Cashfree V2 beneficiary already exists', { beneficiaryId });
-      return { success: true, alreadyExists: true };
+      // 409 means we don't know the current status — must poll
+      return { success: true, alreadyExists: true, alreadyVerified: false };
     }
 
     logger.error('Cashfree V2 create beneficiary error', {
@@ -208,11 +214,17 @@ const waitForBeneficiaryVerified = async (
         timeout: 10_000,
       });
 
-      const beneStatus = res.data?.beneficiary_status;
+      // Log full response on first attempt to understand field names
+      if (attempt === 1) {
+        logger.info('Beneficiary GET full response', { beneficiaryId, body: JSON.stringify(res.data) });
+      }
+
+      // Cashfree may use `beneficiary_status` or `status` depending on endpoint version
+      const beneStatus = res.data?.beneficiary_status ?? res.data?.status;
       logger.info('Beneficiary status check', { beneficiaryId, beneStatus, attempt });
 
       if (beneStatus === 'VERIFIED') return true;
-      if (['INVALID', 'FAILED', 'CANCELLED', 'DELETED'].includes(beneStatus)) {
+      if (['INVALID', 'FAILED', 'CANCELLED', 'DELETED'].includes(beneStatus ?? '')) {
         logger.error('Beneficiary verification failed', { beneficiaryId, beneStatus });
         return false;
       }
@@ -291,13 +303,19 @@ export const initiatePayoutTransfer = async (
     }
   }
 
-  // ── Step 2: Poll until VERIFIED ──
-  const isVerified = await waitForBeneficiaryVerified(baseUrl, beneficiaryId);
-  if (!isVerified) {
-    return {
-      status: 'ERROR',
-      message: 'Beneficiary verification failed or timed out. Please check your UPI ID / bank details.',
-    };
+  // ── Step 2: Poll until VERIFIED (skip if already VERIFIED from create response) ──
+  const alreadyVerified = beneResult.alreadyVerified === true;
+
+  if (alreadyVerified) {
+    logger.info('Beneficiary already VERIFIED from create response — skipping poll', { beneficiaryId });
+  } else {
+    const isVerified = await waitForBeneficiaryVerified(baseUrl, beneficiaryId);
+    if (!isVerified) {
+      return {
+        status: 'ERROR',
+        message: 'Beneficiary verification failed or timed out. Please check your UPI ID / bank details.',
+      };
+    }
   }
 
   // ── Step 3: Initiate transfer — ONLY beneficiary_id ──
