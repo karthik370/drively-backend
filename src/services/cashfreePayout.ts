@@ -4,13 +4,13 @@
  * Handles automatic money transfers to drivers via
  * Cashfree Payouts V2 API (Standard Transfer).
  *
- * V2 uses direct x-client-id / x-client-secret headers.
- * No separate authorize step or bearer token needed.
+ * Auth: x-client-id + x-client-secret + X-Cf-Signature (RSA public key 2FA)
  *
  * Separate from cashfree.ts (Payment Gateway for collecting money).
  * This service is for SENDING money to drivers.
  */
 import axios from 'axios';
+import crypto from 'crypto';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 
@@ -28,7 +28,7 @@ const getPayoutConfig = () => {
     );
   }
 
-  // V2 uses different base URLs than V1
+  // V2 base URLs
   const baseUrl =
     env === 'PRODUCTION'
       ? 'https://api.cashfree.com/payout'
@@ -37,14 +37,50 @@ const getPayoutConfig = () => {
   return { clientId, clientSecret, env, baseUrl };
 };
 
+// ── RSA Signature for Public Key 2FA ───────────────────────────────────────
+
 /**
- * Get common V2 auth headers — no token needed, just client ID + secret.
+ * Generate X-Cf-Signature using RSA public key encryption.
+ * Encrypts "clientId.unixTimestamp" with the public key PEM.
+ * Required because user has enabled Public Key 2FA on Cashfree dashboard.
+ */
+const generateCfSignature = (clientId: string): string => {
+  const rawKey = process.env.CASHFREE_PAYOUT_PUBLIC_KEY;
+  if (!rawKey) {
+    throw new AppError(
+      'CASHFREE_PAYOUT_PUBLIC_KEY is not set.',
+      500,
+    );
+  }
+
+  // dotenv stores \n as literal "\\n" — convert to real newlines for valid PEM
+  const publicKeyPem = rawKey.replace(/\\n/g, '\n');
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const dataToSign = `${clientId}.${timestamp}`;
+
+  const encrypted = crypto.publicEncrypt(
+    {
+      key: publicKeyPem,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    Buffer.from(dataToSign),
+  );
+
+  return encrypted.toString('base64');
+};
+
+/**
+ * Get V2 auth headers including RSA signature for 2FA.
  */
 const getV2Headers = () => {
   const { clientId, clientSecret } = getPayoutConfig();
+  const signature = generateCfSignature(clientId);
+
   return {
     'x-client-id': clientId,
     'x-client-secret': clientSecret,
+    'X-Cf-Signature': signature,
     'x-api-version': '2024-01-01',
     'Content-Type': 'application/json',
   };
@@ -53,24 +89,21 @@ const getV2Headers = () => {
 // ── Standard Transfer (V2) ─────────────────────────────────────────────────
 
 export interface PayoutTransferParams {
-  transferId: string;     // Unique ID (e.g. "PAY_<payoutId>")
-  amount: number;         // In rupees, e.g. 500.00
+  transferId: string;
+  amount: number;
   transferMode: 'upi' | 'banktransfer' | 'imps' | 'neft';
-  // Beneficiary details
   beneName: string;
   benePhone: string;
   beneEmail?: string;
-  // UPI (if transferMode is 'upi')
   beneVpa?: string;
-  // Bank (if transferMode is 'banktransfer' / 'imps' / 'neft')
   beneBankAccount?: string;
   beneIfsc?: string;
   remarks?: string;
 }
 
 export interface PayoutTransferResult {
-  status: string;         // "SUCCESS" | "PENDING" | "ERROR"
-  referenceId?: string;   // Cashfree's reference ID
+  status: string;
+  referenceId?: string;
   subCode?: string;
   message?: string;
   acknowledged?: number;
@@ -86,7 +119,6 @@ export const initiatePayoutTransfer = async (
   const { baseUrl } = getPayoutConfig();
   const headers = getV2Headers();
 
-  // Build beneficiary details based on transfer mode
   const beneficiary: any = {
     beneficiary_id: `bene_${params.transferId}`,
     beneficiary_name: params.beneName,
@@ -138,7 +170,6 @@ export const initiatePayoutTransfer = async (
       error: JSON.stringify(errData) || err?.message,
     });
 
-    // If Cashfree returns a structured error, return it gracefully
     if (errData) {
       return {
         status: 'ERROR',
