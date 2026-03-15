@@ -279,7 +279,7 @@ export class DriverWalletService {
                 forceRecreate: !!(details && (details.upiId || details.bankAccountNumber)),
             });
 
-            if (result.status === 'SUCCESS' || result.status === 'PENDING') {
+            if (result.status === 'SUCCESS' || result.status === 'PENDING' || result.status === 'RECEIVED') {
                 // Cashfree accepted the transfer
                 await prisma.driverPayout.update({
                     where: { id: payout.id },
