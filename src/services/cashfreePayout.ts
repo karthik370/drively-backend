@@ -1,16 +1,16 @@
 /**
- * Cashfree Payouts — Driver Withdrawal Utility
- * ──────────────────────────────────────────────
+ * Cashfree Payouts V2 — Driver Withdrawal Utility
+ * ──────────────────────────────────────────────────
  * Handles automatic money transfers to drivers via
- * Cashfree Payouts API v1 (directTransfer).
+ * Cashfree Payouts V2 API (Standard Transfer).
  *
- * Uses PUBLIC KEY authentication (no IP whitelisting needed).
+ * V2 uses direct x-client-id / x-client-secret headers.
+ * No separate authorize step or bearer token needed.
  *
  * Separate from cashfree.ts (Payment Gateway for collecting money).
  * This service is for SENDING money to drivers.
  */
 import axios from 'axios';
-import crypto from 'crypto';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 
@@ -28,109 +28,29 @@ const getPayoutConfig = () => {
     );
   }
 
+  // V2 uses different base URLs than V1
   const baseUrl =
     env === 'PRODUCTION'
-      ? 'https://payout-api.cashfree.com'
-      : 'https://payout-gamma.cashfree.com';
+      ? 'https://api.cashfree.com/payout'
+      : 'https://sandbox.cashfree.com/payout';
 
   return { clientId, clientSecret, env, baseUrl };
 };
 
-// ── RSA Signature for Public Key Auth ──────────────────────────────────────
-
 /**
- * Generate X-Cf-Signature using RSA public key encryption.
- * Encrypts "clientId.unixTimestamp" with the public key PEM.
- * Valid for 10 min (test) / 5 min (production).
+ * Get common V2 auth headers — no token needed, just client ID + secret.
  */
-const generateCfSignature = (clientId: string): string => {
-  const rawKey = process.env.CASHFREE_PAYOUT_PUBLIC_KEY;
-  if (!rawKey) {
-    throw new AppError(
-      'CASHFREE_PAYOUT_PUBLIC_KEY is not set. Download public key from Cashfree Payouts dashboard → Developers → Two-Factor Authentication → Public Key.',
-      500,
-    );
-  }
-
-  // dotenv stores \n as literal "\\n" — convert to real newlines
-  const publicKeyPem = rawKey.replace(/\\n/g, '\n');
-
-  const timestamp = Math.floor(Date.now() / 1000); // UNIX timestamp
-  const dataToSign = `${clientId}.${timestamp}`;
-
-  // RSA encrypt using the public key
-  const encrypted = crypto.publicEncrypt(
-    {
-      key: publicKeyPem,
-      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-    },
-    Buffer.from(dataToSign),
-  );
-
-  return encrypted.toString('base64');
+const getV2Headers = () => {
+  const { clientId, clientSecret } = getPayoutConfig();
+  return {
+    'x-client-id': clientId,
+    'x-client-secret': clientSecret,
+    'x-api-version': '2024-01-01',
+    'Content-Type': 'application/json',
+  };
 };
 
-// ── Token Cache ────────────────────────────────────────────────────────────
-
-let cachedToken: string | null = null;
-let tokenExpiresAt = 0;
-
-/**
- * Get authorization bearer token — cached for ~4 minutes.
- * POST /payout/v1/authorize
- * Uses public key signature (X-Cf-Signature) instead of IP whitelisting.
- */
-export const getPayoutAuthToken = async (): Promise<string> => {
-  if (cachedToken && Date.now() < tokenExpiresAt) {
-    return cachedToken;
-  }
-
-  const { clientId, clientSecret, baseUrl } = getPayoutConfig();
-
-  // Generate RSA signature for public key auth
-  const signature = generateCfSignature(clientId);
-
-  try {
-    const res = await axios.post(
-      `${baseUrl}/payout/v1/authorize`,
-      {},
-      {
-        headers: {
-          'x-client-id': clientId,
-          'x-client-secret': clientSecret,
-          'X-Cf-Signature': signature,
-          'Content-Type': 'application/json',
-        },
-        timeout: 15_000,
-      },
-    );
-
-    const data = res.data?.data;
-    const token = data?.token;
-    const expiresAt = data?.expiry; // ISO string
-
-    if (!token) {
-      logger.error('Cashfree Payout auth failed — no token in response', { body: res.data });
-      throw new AppError('Cashfree Payout authorization failed', 500);
-    }
-
-    cachedToken = token;
-    // Cache for 4 minutes (token valid ~5 min)
-    tokenExpiresAt = expiresAt
-      ? new Date(expiresAt).getTime() - 60_000
-      : Date.now() + 4 * 60_000;
-
-    return token;
-  } catch (err: any) {
-    if (err instanceof AppError) throw err;
-    logger.error('Cashfree Payout auth error', {
-      message: err?.response?.data || err?.message,
-    });
-    throw new AppError('Failed to authenticate with Cashfree Payouts', 500);
-  }
-};
-
-// ── Direct Transfer ────────────────────────────────────────────────────────
+// ── Standard Transfer (V2) ─────────────────────────────────────────────────
 
 export interface PayoutTransferParams {
   transferId: string;     // Unique ID (e.g. "PAY_<payoutId>")
@@ -153,80 +73,77 @@ export interface PayoutTransferResult {
   referenceId?: string;   // Cashfree's reference ID
   subCode?: string;
   message?: string;
-  acknowledged?: number;  // 1 = beneficiary received, 0 = not yet
+  acknowledged?: number;
 }
 
 /**
- * Initiate a direct transfer to a beneficiary.
- * POST /payout/v1/directTransfer
+ * Initiate a standard transfer to a beneficiary.
+ * POST /payout/transfers (V2 API)
  */
 export const initiatePayoutTransfer = async (
   params: PayoutTransferParams,
 ): Promise<PayoutTransferResult> => {
   const { baseUrl } = getPayoutConfig();
-  const token = await getPayoutAuthToken();
+  const headers = getV2Headers();
 
-  const body: any = {
-    amount: params.amount,
-    transferId: params.transferId,
-    transferMode: params.transferMode,
-    remarks: params.remarks || 'DriveMate driver withdrawal',
-    beneDetails: {
-      name: params.beneName,
-      phone: params.benePhone,
-      email: params.beneEmail || 'driver@drivemate.app',
-      address1: 'DriveMate Driver',
-    },
+  // Build beneficiary details based on transfer mode
+  const beneficiary: any = {
+    beneficiary_id: `bene_${params.transferId}`,
+    beneficiary_name: params.beneName,
+    beneficiary_phone: params.benePhone,
+    beneficiary_email: params.beneEmail || 'driver@drivemate.app',
   };
 
-  // Add UPI or bank details
   if (params.transferMode === 'upi') {
-    body.beneDetails.vpa = params.beneVpa;
+    beneficiary.beneficiary_vpa = params.beneVpa;
   } else {
-    body.beneDetails.bankAccount = params.beneBankAccount;
-    body.beneDetails.ifsc = params.beneIfsc;
+    beneficiary.beneficiary_account_number = params.beneBankAccount;
+    beneficiary.beneficiary_ifsc = params.beneIfsc;
   }
 
+  const body = {
+    transfer_id: params.transferId,
+    transfer_amount: params.amount,
+    transfer_mode: params.transferMode === 'upi' ? 'UPI' : 'BANKTRANSFER',
+    remarks: params.remarks || 'DriveMate driver withdrawal',
+    beneficiary_details: beneficiary,
+  };
+
   try {
-    const res = await axios.post(`${baseUrl}/payout/v1/directTransfer`, body, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
+    const res = await axios.post(`${baseUrl}/transfers`, body, {
+      headers,
       timeout: 30_000,
     });
 
     const resData = res.data;
 
-    logger.info('Cashfree Payout directTransfer response', {
+    logger.info('Cashfree Payout V2 transfer response', {
       transferId: params.transferId,
       status: resData?.status,
-      subCode: resData?.subCode,
       message: resData?.message,
-      data: resData?.data,
+      cfTransferId: resData?.cf_transfer_id,
       fullBody: JSON.stringify(resData),
     });
 
     return {
       status: resData?.status || 'ERROR',
-      referenceId: resData?.data?.referenceId || undefined,
-      subCode: resData?.subCode || undefined,
+      referenceId: resData?.cf_transfer_id?.toString() || resData?.transfer_id || undefined,
       message: resData?.message || undefined,
-      acknowledged: resData?.data?.acknowledged ?? 0,
     };
   } catch (err: any) {
     const errData = err?.response?.data;
-    logger.error('Cashfree Payout directTransfer error', {
+    logger.error('Cashfree Payout V2 transfer error', {
       transferId: params.transferId,
-      error: errData || err?.message,
+      status: err?.response?.status,
+      error: JSON.stringify(errData) || err?.message,
     });
 
-    // If Cashfree returns a structured error
-    if (errData?.status === 'ERROR') {
+    // If Cashfree returns a structured error, return it gracefully
+    if (errData) {
       return {
         status: 'ERROR',
-        subCode: errData?.subCode,
-        message: errData?.message || 'Transfer failed',
+        subCode: String(err?.response?.status || ''),
+        message: errData?.message || errData?.error || 'Transfer failed',
       };
     }
 
@@ -237,10 +154,10 @@ export const initiatePayoutTransfer = async (
   }
 };
 
-// ── Get Transfer Status ────────────────────────────────────────────────────
+// ── Get Transfer Status (V2) ───────────────────────────────────────────────
 
 export interface PayoutTransferStatus {
-  status: string;         // "SUCCESS" | "PENDING" | "FAILED" | "REVERSED"
+  status: string;
   referenceId?: string;
   reason?: string;
   acknowledged?: number;
@@ -250,36 +167,32 @@ export interface PayoutTransferStatus {
 
 /**
  * Get the status of a previously initiated transfer.
- * GET /payout/v1/getTransferStatus?transferId=X
+ * GET /payout/transfers/:transferId (V2 API)
  */
 export const getPayoutTransferStatus = async (
   transferId: string,
 ): Promise<PayoutTransferStatus> => {
   const { baseUrl } = getPayoutConfig();
-  const token = await getPayoutAuthToken();
+  const headers = getV2Headers();
 
   try {
-    const res = await axios.get(`${baseUrl}/payout/v1/getTransferStatus`, {
-      params: { transferId },
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
+    const res = await axios.get(`${baseUrl}/transfers/${transferId}`, {
+      headers,
       timeout: 15_000,
     });
 
-    const transfer = res.data?.data?.transfer;
+    const data = res.data;
 
     return {
-      status: transfer?.status || res.data?.status || 'UNKNOWN',
-      referenceId: transfer?.referenceId || undefined,
-      reason: transfer?.reason || undefined,
-      acknowledged: transfer?.acknowledged ?? 0,
-      transferMode: transfer?.transferMode || undefined,
-      amount: transfer?.amount ? Number(transfer.amount) : undefined,
+      status: data?.status || 'UNKNOWN',
+      referenceId: data?.cf_transfer_id?.toString() || undefined,
+      reason: data?.status_description || undefined,
+      acknowledged: data?.status === 'SUCCESS' ? 1 : 0,
+      transferMode: data?.transfer_mode || undefined,
+      amount: data?.transfer_amount ? Number(data.transfer_amount) : undefined,
     };
   } catch (err: any) {
-    logger.error('Cashfree Payout getTransferStatus error', {
+    logger.error('Cashfree Payout V2 getTransferStatus error', {
       transferId,
       error: err?.response?.data || err?.message,
     });
