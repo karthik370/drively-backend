@@ -267,6 +267,7 @@ export class DriverWalletService {
             const result = await initiatePayoutTransfer({
                 transferId,
                 amount,
+                driverId: userId,
                 transferMode: method === 'UPI' ? 'upi' : 'banktransfer',
                 beneName,
                 benePhone,
@@ -275,6 +276,7 @@ export class DriverWalletService {
                 beneBankAccount: method === 'BANK' ? (profile.bankAccountNumber || undefined) : undefined,
                 beneIfsc: method === 'BANK' ? (profile.bankIfscCode || undefined) : undefined,
                 remarks: `DriveMate withdrawal - ${payout.id}`,
+                forceRecreate: !!(details && (details.upiId || details.bankAccountNumber)),
             });
 
             if (result.status === 'SUCCESS' || result.status === 'PENDING') {

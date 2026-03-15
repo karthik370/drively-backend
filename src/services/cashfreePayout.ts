@@ -6,33 +6,25 @@
  *
  * Flow:
  *   1. Create beneficiary (POST /payout/beneficiary)
- *      - If 409 (already exists) and details changed → delete + recreate
+ *      - If 409 and forceRecreate → delete + recreate (driver changed UPI/bank)
+ *      - If 409 and !forceRecreate → reuse existing
  *   2. Poll beneficiary status until VERIFIED (GET /payout/beneficiary/:id)
  *   3. Initiate transfer (POST /payout/transfers)
  *
- * Auth Headers:
- *   x-client-id      → Client ID from Cashfree Dashboard
- *   x-client-secret  → Client Secret from Cashfree Dashboard
- *   X-Cf-Signature   → RSA encrypted "clientId.unixTimestamp" (public key 2FA)
- *   x-api-version    → "2024-01-01"
+ * Auth: x-client-id + x-client-secret + X-Cf-Signature (RSA public key 2FA)
  *
- * Endpoints:
- *   POST   /payout/beneficiary             → Create a beneficiary (singular!)
+ * Endpoints (verified against sandbox):
+ *   POST   /payout/beneficiary             → Create beneficiary
  *   GET    /payout/beneficiary/:id         → Get beneficiary status
- *   DELETE /payout/beneficiary/:id         → Remove beneficiary (for re-creation)
- *   POST   /payout/transfers               → Create a transfer (plural!)
+ *   DELETE /payout/beneficiary/:id         → Remove beneficiary
+ *   POST   /payout/transfers               → Create transfer
  *   GET    /payout/transfers/:transferId   → Get transfer status
  *
  * Base URLs:
  *   Test:  https://sandbox.cashfree.com/payout
  *   Prod:  https://api.cashfree.com/payout
  *
- * transfer_mode valid values (lowercase):
- *   "banktransfer" | "upi" | "imps" | "neft" | "rtgs" | "card"
- *
- * Sandbox test VPAs:
- *   "success@upi" → verifies successfully
- *   "failure@upi" → fails verification
+ * Sandbox test VPAs: "success@upi" (pass) / "failure@upi" (fail)
  */
 import axios from 'axios';
 import crypto from 'crypto';
@@ -50,7 +42,7 @@ const getPayoutConfig = () => {
 
   if (!clientId || !clientSecret) {
     throw new AppError(
-      'Cashfree Payout credentials not configured. Set CASHFREE_PAYOUT_CLIENT_ID and CASHFREE_PAYOUT_CLIENT_SECRET.',
+      'Cashfree Payout credentials not configured.',
       500,
     );
   }
@@ -75,11 +67,10 @@ const generateCfSignature = (clientId: string): string => {
 
   const publicKeyPem = rawKey.replace(/\\n/g, '\n');
   const timestamp = Math.floor(Date.now() / 1000);
-  const payload = `${clientId}.${timestamp}`;
 
   const encrypted = crypto.publicEncrypt(
     { key: publicKeyPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING },
-    Buffer.from(payload),
+    Buffer.from(`${clientId}.${timestamp}`),
   );
 
   return encrypted.toString('base64');
@@ -108,6 +99,7 @@ export interface PayoutTransferParams {
   transferId: string;
   amount: number;
   transferMode: 'upi' | 'banktransfer' | 'imps' | 'neft';
+  driverId: string;           // Driver's UUID — used for stable beneficiary ID
   beneName: string;
   benePhone: string;
   beneEmail?: string;
@@ -115,6 +107,7 @@ export interface PayoutTransferParams {
   beneBankAccount?: string;
   beneIfsc?: string;
   remarks?: string;
+  forceRecreate?: boolean;    // Set true when driver updates UPI/bank details
 }
 
 export interface PayoutTransferResult {
@@ -136,7 +129,6 @@ export interface PayoutTransferStatus {
 // Beneficiary Management — POST/GET/DELETE /payout/beneficiary
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Create a beneficiary. Returns success=true if created or already exists. */
 const createBeneficiary = async (
   baseUrl: string,
   beneficiaryId: string,
@@ -168,7 +160,6 @@ const createBeneficiary = async (
     const status = err?.response?.status;
     const errData = err?.response?.data;
 
-    // 409 = already exists — fine, will reuse
     if (status === 409) {
       logger.info('Cashfree V2 beneficiary already exists', { beneficiaryId });
       return { success: true, alreadyExists: true };
@@ -183,7 +174,6 @@ const createBeneficiary = async (
   }
 };
 
-/** Delete a beneficiary (to recreate with updated UPI/Bank details). */
 const deleteBeneficiary = async (baseUrl: string, beneficiaryId: string): Promise<boolean> => {
   try {
     await axios.delete(`${baseUrl}/beneficiary/${beneficiaryId}`, {
@@ -219,16 +209,15 @@ const waitForBeneficiaryVerified = async (
       });
 
       const beneStatus = res.data?.beneficiary_status;
-      logger.info('Cashfree beneficiary status check', { beneficiaryId, beneStatus, attempt });
+      logger.info('Beneficiary status check', { beneficiaryId, beneStatus, attempt });
 
       if (beneStatus === 'VERIFIED') return true;
       if (['INVALID', 'FAILED', 'CANCELLED', 'DELETED'].includes(beneStatus)) {
-        logger.error('Cashfree beneficiary verification failed', { beneficiaryId, beneStatus });
+        logger.error('Beneficiary verification failed', { beneficiaryId, beneStatus });
         return false;
       }
-      // INITIATED — keep polling
     } catch (err: any) {
-      logger.warn('Cashfree beneficiary status check error', {
+      logger.warn('Beneficiary status check error', {
         beneficiaryId,
         attempt,
         error: err?.response?.data?.message || err?.message,
@@ -238,13 +227,12 @@ const waitForBeneficiaryVerified = async (
     await new Promise(r => setTimeout(r, intervalMs));
   }
 
-  logger.error('Cashfree beneficiary VERIFIED timeout after max attempts', { beneficiaryId, maxAttempts });
+  logger.error('Beneficiary VERIFIED timeout', { beneficiaryId, maxAttempts });
   return false;
 };
 
 // ────────────────────────────────────────────────────────────────────────────
 // Create Transfer — POST /payout/transfers
-// Full flow: Create/reuse beneficiary → Poll VERIFIED → Transfer
 // ────────────────────────────────────────────────────────────────────────────
 
 export const initiatePayoutTransfer = async (
@@ -252,7 +240,7 @@ export const initiatePayoutTransfer = async (
 ): Promise<PayoutTransferResult> => {
   const { baseUrl } = getPayoutConfig();
 
-  // Build beneficiary_instrument_details
+  // ── Validate inputs ──
   const instrumentDetails: Record<string, string> = {};
 
   if (params.transferMode === 'upi') {
@@ -268,49 +256,47 @@ export const initiatePayoutTransfer = async (
     instrumentDetails.bank_ifsc = params.beneIfsc;
   }
 
-  // Validate phone
   const phone = (params.benePhone || '').replace(/\D/g, '').slice(-10);
   if (phone.length !== 10) {
     return { status: 'ERROR', message: 'Invalid phone number — must be 10 digits' };
   }
 
-  // Stable beneficiary ID per driver phone
-  const beneficiaryId = `bene_driver_${phone}`;
+  // Stable beneficiary ID per driver UUID
+  const beneficiaryId = `bene_${params.driverId.replace(/-/g, '').slice(0, 45)}`;
 
   // ── Step 1: Create or reuse beneficiary ──
-  const beneResult = await createBeneficiary(
+  let beneResult = await createBeneficiary(
     baseUrl, beneficiaryId, params.beneName, phone,
     params.beneEmail || 'driver@drivemate.app', instrumentDetails,
   );
 
-  // If already exists, driver may have changed UPI/bank details →
-  // delete old beneficiary and recreate with new details
-  if (beneResult.alreadyExists) {
-    logger.info('Beneficiary exists — deleting and recreating with latest details', { beneficiaryId });
+  // If creation failed (not 409), stop immediately
+  if (!beneResult.success) {
+    return { status: 'ERROR', message: beneResult.message || 'Failed to register beneficiary' };
+  }
+
+  // If already exists AND driver changed their details → delete + recreate
+  if (beneResult.alreadyExists && params.forceRecreate) {
+    logger.info('Beneficiary exists + forceRecreate → deleting and recreating', { beneficiaryId });
     await deleteBeneficiary(baseUrl, beneficiaryId);
-    // Small wait for deletion propagation
     await new Promise(r => setTimeout(r, 1000));
 
-    const recreateResult = await createBeneficiary(
+    beneResult = await createBeneficiary(
       baseUrl, beneficiaryId, params.beneName, phone,
       params.beneEmail || 'driver@drivemate.app', instrumentDetails,
     );
 
-    if (!recreateResult.success) {
-      return { status: 'ERROR', message: recreateResult.message || 'Failed to update beneficiary details' };
+    if (!beneResult.success) {
+      return { status: 'ERROR', message: beneResult.message || 'Failed to update beneficiary' };
     }
   }
 
-  if (!beneResult.success && !beneResult.alreadyExists) {
-    return { status: 'ERROR', message: beneResult.message || 'Failed to register beneficiary' };
-  }
-
-  // ── Step 2: Poll until beneficiary is VERIFIED ──
+  // ── Step 2: Poll until VERIFIED ──
   const isVerified = await waitForBeneficiaryVerified(baseUrl, beneficiaryId);
   if (!isVerified) {
     return {
       status: 'ERROR',
-      message: 'Beneficiary verification failed or timed out. Please check your UPI ID / bank details and try again.',
+      message: 'Beneficiary verification failed or timed out. Please check your UPI ID / bank details.',
     };
   }
 
@@ -353,11 +339,10 @@ export const initiatePayoutTransfer = async (
     };
   } catch (err: any) {
     const errData = err?.response?.data;
-    const httpStatus = err?.response?.status;
 
     logger.error('Cashfree V2 transfer error', {
       transferId: params.transferId,
-      httpStatus,
+      httpStatus: err?.response?.status,
       type: errData?.type,
       code: errData?.code,
       message: errData?.message,
@@ -366,7 +351,7 @@ export const initiatePayoutTransfer = async (
 
     return {
       status: 'ERROR',
-      subCode: errData?.code || String(httpStatus || ''),
+      subCode: errData?.code || String(err?.response?.status || ''),
       message: errData?.message || 'Transfer failed — check logs for details',
     };
   }
@@ -401,6 +386,9 @@ export const getPayoutTransferStatus = async (
       transferId,
       error: JSON.stringify(err?.response?.data) || err?.message,
     });
-    throw new AppError('Failed to get payout transfer status', 500);
+    return {
+      status: 'ERROR',
+      reason: err?.response?.data?.message || err?.message || 'Failed to get transfer status',
+    };
   }
 };
