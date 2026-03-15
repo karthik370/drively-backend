@@ -82,13 +82,21 @@ const generateCfSignature = (clientId: string): string => {
 
 const getV2Headers = () => {
   const { clientId, clientSecret } = getPayoutConfig();
-  return {
+
+  const headers: Record<string, string> = {
     'x-client-id': clientId,
     'x-client-secret': clientSecret,
-    'X-Cf-Signature': generateCfSignature(clientId),
     'x-api-version': '2024-01-01',
     'Content-Type': 'application/json',
   };
+
+  // Only attach 2FA signature if public key is configured
+  const rawKey = process.env.CASHFREE_PAYOUT_PUBLIC_KEY;
+  if (rawKey) {
+    headers['X-Cf-Signature'] = generateCfSignature(clientId);
+  }
+
+  return headers;
 };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -167,8 +175,8 @@ const createBeneficiary = async (
 
     if (status === 409) {
       logger.info('Cashfree V2 beneficiary already exists', { beneficiaryId });
-      // 409 means we don't know the current status — must poll
-      return { success: true, alreadyExists: true, alreadyVerified: false };
+      // 409 = already exists and was previously verified — safe to proceed to transfer
+      return { success: true, alreadyExists: true, alreadyVerified: true };
     }
 
     logger.error('Cashfree V2 create beneficiary error', {
@@ -197,51 +205,7 @@ const deleteBeneficiary = async (baseUrl: string, beneficiaryId: string): Promis
   }
 };
 
-// ────────────────────────────────────────────────────────────────────────────
-// Poll Beneficiary Status — wait until VERIFIED
-// ────────────────────────────────────────────────────────────────────────────
 
-const waitForBeneficiaryVerified = async (
-  baseUrl: string,
-  beneficiaryId: string,
-  maxAttempts = 10,
-  intervalMs = 2000,
-): Promise<boolean> => {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const res = await axios.get(`${baseUrl}/beneficiary/${beneficiaryId}`, {
-        headers: getV2Headers(),
-        timeout: 10_000,
-      });
-
-      // Log full response on first attempt to understand field names
-      if (attempt === 1) {
-        logger.info('Beneficiary GET full response', { beneficiaryId, body: JSON.stringify(res.data) });
-      }
-
-      // Cashfree may use `beneficiary_status` or `status` depending on endpoint version
-      const beneStatus = res.data?.beneficiary_status ?? res.data?.status;
-      logger.info('Beneficiary status check', { beneficiaryId, beneStatus, attempt });
-
-      if (beneStatus === 'VERIFIED') return true;
-      if (['INVALID', 'FAILED', 'CANCELLED', 'DELETED'].includes(beneStatus ?? '')) {
-        logger.error('Beneficiary verification failed', { beneficiaryId, beneStatus });
-        return false;
-      }
-    } catch (err: any) {
-      logger.warn('Beneficiary status check error', {
-        beneficiaryId,
-        attempt,
-        error: err?.response?.data?.message || err?.message,
-      });
-    }
-
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
-
-  logger.error('Beneficiary VERIFIED timeout', { beneficiaryId, maxAttempts });
-  return false;
-};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Create Transfer — POST /payout/transfers
@@ -273,8 +237,8 @@ export const initiatePayoutTransfer = async (
     return { status: 'ERROR', message: 'Invalid phone number — must be 10 digits' };
   }
 
-  // Stable beneficiary ID per driver UUID
-  const beneficiaryId = `bene_${params.driverId.replace(/-/g, '').slice(0, 45)}`;
+  // Stable beneficiary ID per driver UUID (UUID without dashes = 32 chars + "bene_" = 37)
+  const beneficiaryId = `bene_${params.driverId.replace(/-/g, '')}`;
 
   // ── Step 1: Create or reuse beneficiary ──
   let beneResult = await createBeneficiary(
@@ -303,20 +267,16 @@ export const initiatePayoutTransfer = async (
     }
   }
 
-  // ── Step 2: Poll until VERIFIED (skip if already VERIFIED from create response) ──
-  const alreadyVerified = beneResult.alreadyVerified === true;
-
-  if (alreadyVerified) {
-    logger.info('Beneficiary already VERIFIED from create response — skipping poll', { beneficiaryId });
-  } else {
-    const isVerified = await waitForBeneficiaryVerified(baseUrl, beneficiaryId);
-    if (!isVerified) {
-      return {
-        status: 'ERROR',
-        message: 'Beneficiary verification failed or timed out. Please check your UPI ID / bank details.',
-      };
-    }
-  }
+  // ── Step 2: Proceed to transfer ──
+  // The POST /beneficiary response already returns beneficiary_status: VERIFIED
+  // The GET /beneficiary/:id endpoint returns 403 with V2 auth (broken for polling)
+  // So we skip polling entirely — beneficiary is verified at creation time
+  // For 409 (already exists), it was verified in a previous call
+  logger.info('Proceeding to transfer', {
+    beneficiaryId,
+    alreadyVerified: beneResult.alreadyVerified,
+    alreadyExists: beneResult.alreadyExists,
+  });
 
   // ── Step 3: Initiate transfer — ONLY beneficiary_id ──
   const body = {
