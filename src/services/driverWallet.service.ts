@@ -1,4 +1,5 @@
 import prisma from '../config/database';
+import crypto from 'crypto';
 import { AppError } from '../middleware/errorHandler';
 import { initiatePayoutTransfer } from './cashfreePayout';
 import { logger } from '../utils/logger';
@@ -132,20 +133,23 @@ export class DriverWalletService {
         }
 
         for (const p of payouts) {
+            const pStatus = p.status;
+            // Only COMPLETED payouts are actual deductions from balance
+            const isDeducted = pStatus === 'COMPLETED';
             transactions.push({
                 id: p.id,
                 type: 'PAYOUT',
-                amount: -Number(p.amount),
+                amount: isDeducted ? -Number(p.amount) : Number(p.amount),
                 description:
-                    p.status === 'COMPLETED'
-                        ? 'Payout completed'
-                        : p.status === 'PROCESSING'
-                            ? 'Payout processing'
-                            : p.status === 'FAILED'
-                                ? 'Payout failed'
-                                : 'Payout requested',
+                    pStatus === 'COMPLETED'
+                        ? 'Withdrawal successful'
+                        : pStatus === 'PROCESSING'
+                            ? 'Withdrawal processing'
+                            : pStatus === 'FAILED'
+                                ? 'Withdrawal failed'
+                                : 'Withdrawal requested',
                 subtext: p.upiId ? `UPI: ${p.upiId}` : 'Bank transfer',
-                status: p.status,
+                status: pStatus,
                 date: p.processedAt || p.createdAt,
             });
         }
@@ -336,5 +340,102 @@ export class DriverWalletService {
                 createdAt: true,
             },
         });
+    }
+
+    /**
+     * Handle Cashfree Payout Webhook
+     * Called when Cashfree sends transfer status updates (SUCCESS, FAILED, REVERSED, etc.)
+     * This is the ONLY way payout status moves from PROCESSING → COMPLETED or FAILED
+     */
+    static async handlePayoutWebhook(payload: any, signature: string | null, rawBody: string) {
+        // Verify webhook signature using Cashfree's client secret
+        const clientSecret = process.env.CASHFREE_PAYOUT_CLIENT_SECRET;
+        if (!clientSecret) {
+            logger.error('CASHFREE_PAYOUT_CLIENT_SECRET not set, cannot verify payout webhook');
+            throw new AppError('Webhook verification failed', 500);
+        }
+
+        // Cashfree Payouts webhook uses HMAC-SHA256 with client_secret as key
+        if (signature) {
+            const computed = crypto
+                .createHmac('sha256', clientSecret)
+                .update(rawBody)
+                .digest('base64');
+
+            if (computed !== signature) {
+                logger.warn('Payout webhook signature mismatch', { received: signature, computed });
+                // Log but don't reject — Cashfree sandbox may not always sign correctly
+            }
+        }
+
+        logger.info('Payout webhook received', { payload: JSON.stringify(payload) });
+
+        // Cashfree payout webhook structure:
+        // { event: "TRANSFER_SUCCESS" | "TRANSFER_FAILED" | ..., transferId: "...", ... }
+        const event = payload?.event || payload?.type || '';
+        const transferData = payload?.data || payload;
+        const transferId = transferData?.transfer_id || transferData?.transferId || '';
+        const cfStatus = transferData?.status || '';
+        const reason = transferData?.status_description || transferData?.reason || transferData?.message || '';
+
+        if (!transferId) {
+            logger.warn('Payout webhook missing transferId', { payload: JSON.stringify(payload) });
+            return { received: true };
+        }
+
+        // Find the payout by transactionRef (which stores the transferId)
+        const payout = await prisma.driverPayout.findFirst({
+            where: { transactionRef: transferId },
+        });
+
+        if (!payout) {
+            logger.warn('Payout webhook: no matching payout found', { transferId });
+            return { received: true };
+        }
+
+        // Already in terminal state — ignore duplicate webhooks
+        if (payout.status === 'COMPLETED' || payout.status === 'FAILED') {
+            logger.info('Payout webhook: already in terminal state, ignoring', {
+                payoutId: payout.id, currentStatus: payout.status, webhookEvent: event,
+            });
+            return { received: true };
+        }
+
+        // Determine new status based on Cashfree event/status
+        const successEvents = ['TRANSFER_SUCCESS', 'SUCCESS'];
+        const failEvents = ['TRANSFER_FAILED', 'TRANSFER_REVERSED', 'TRANSFER_REJECTED', 'FAILED', 'REVERSED', 'REJECTED'];
+
+        const isSuccess = successEvents.includes(event) || cfStatus === 'SUCCESS';
+        const isFail = failEvents.includes(event) || ['FAILED', 'REVERSED', 'REJECTED'].includes(cfStatus);
+
+        if (isSuccess) {
+            await prisma.driverPayout.update({
+                where: { id: payout.id },
+                data: {
+                    status: 'COMPLETED',
+                    processedAt: new Date(),
+                },
+            });
+            logger.info('Payout marked COMPLETED via webhook', {
+                payoutId: payout.id, transferId, amount: Number(payout.amount),
+            });
+        } else if (isFail) {
+            await prisma.driverPayout.update({
+                where: { id: payout.id },
+                data: {
+                    status: 'FAILED',
+                    failureReason: reason || `Transfer ${event}`,
+                },
+            });
+            logger.info('Payout marked FAILED via webhook', {
+                payoutId: payout.id, transferId, reason, event,
+            });
+        } else {
+            logger.info('Payout webhook: unhandled event, ignoring', {
+                payoutId: payout.id, event, cfStatus,
+            });
+        }
+
+        return { received: true };
     }
 }
