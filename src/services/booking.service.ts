@@ -12,6 +12,7 @@ import { enqueueScheduledBooking } from './scheduledBooking.service';
 import { InvoiceService } from './invoice.service';
 import { PromotionService } from './promotion.service';
 import { RewardsService } from './rewards.service';
+import { ReferralService } from './referral.service';
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
@@ -1519,8 +1520,20 @@ export class BookingService {
           logger.warn('Failed to award reward coins', { error, bookingId: params.bookingId });
         });
       }
-    }
 
+      // Process referral reward if this is a referred user's first trip
+      const finalBookingForReferral = completedBooking || booking;
+      // Check customer referral
+      ReferralService.processFirstTripReward(finalBookingForReferral.customerId, params.bookingId).catch((error) => {
+        logger.warn('Failed to process customer referral reward', { error, bookingId: params.bookingId });
+      });
+      // Check driver referral
+      if (finalBookingForReferral.driverId) {
+        ReferralService.processFirstTripReward(finalBookingForReferral.driverId, params.bookingId).catch((error) => {
+          logger.warn('Failed to process driver referral reward', { error, bookingId: params.bookingId });
+        });
+      }
+    }
 
 
     const io = getSocketServer();

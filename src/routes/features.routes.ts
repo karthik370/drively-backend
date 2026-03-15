@@ -11,19 +11,19 @@ router.use(authenticate);
 
 // ── Referrals ───────────────────────────────────────────────────────
 
-router.post('/referral/generate', asyncHandler(async (req: AuthRequest, res: Response) => {
+router.get('/referral/my-code', asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false }); return; }
-    const type = req.body.type === 'DRIVER' ? 'DRIVER' : 'CUSTOMER';
-    const data = await ReferralService.generateReferralCode(userId, type);
+    const type = req.query.type === 'DRIVER' ? 'DRIVER' : 'CUSTOMER';
+    const data = await ReferralService.getOrCreateCode(userId, type);
     res.json({ success: true, data });
 }));
 
 router.post('/referral/apply', asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false }); return; }
-    await ReferralService.applyReferralCode(req.body.code, userId);
-    res.json({ success: true, message: 'Referral code applied' });
+    const data = await ReferralService.applyReferralCode(req.body.code, userId);
+    res.json({ success: true, data });
 }));
 
 router.get('/referral/stats', asyncHandler(async (req: AuthRequest, res: Response) => {
