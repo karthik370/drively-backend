@@ -289,7 +289,7 @@ export class DriverWalletService {
                     where: { id: payout.id },
                     data: {
                         status: 'PROCESSING',
-                        transactionRef: result.referenceId || transferId,
+                        transactionRef: transferId,
                     },
                 });
                 return { payoutId: payout.id, status: 'PROCESSING', message: 'Transfer initiated successfully' };
@@ -375,18 +375,24 @@ export class DriverWalletService {
         const event = payload?.event || payload?.type || '';
         const transferData = payload?.data || payload;
         const transferId = transferData?.transfer_id || transferData?.transferId || '';
+        const cfReferenceId = transferData?.referenceId || transferData?.cf_transfer_id || '';
         const cfStatus = transferData?.status || '';
         const reason = transferData?.status_description || transferData?.reason || transferData?.message || '';
 
-        if (!transferId) {
+        if (!transferId && !cfReferenceId) {
             logger.warn('Payout webhook missing transferId', { payload: JSON.stringify(payload) });
             return { received: true };
         }
 
-        // Find the payout by transactionRef (which stores the transferId)
-        const payout = await prisma.driverPayout.findFirst({
+        // Find the payout by transactionRef — search by our transferId first, then Cashfree's referenceId
+        let payout = await prisma.driverPayout.findFirst({
             where: { transactionRef: transferId },
         });
+        if (!payout && cfReferenceId) {
+            payout = await prisma.driverPayout.findFirst({
+                where: { transactionRef: cfReferenceId },
+            });
+        }
 
         if (!payout) {
             logger.warn('Payout webhook: no matching payout found', { transferId });
