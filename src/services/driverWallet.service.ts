@@ -25,24 +25,24 @@ export class DriverWalletService {
         const totalEarnings = Number(profile.totalEarnings || 0);
         const pendingEarnings = Number(profile.pendingEarnings || 0);
 
-        // Calculate total paid out
+        // Calculate total paid out (COMPLETED payouts)
         const paidOut = await prisma.driverPayout.aggregate({
             where: { driverId: userId, status: 'COMPLETED' },
             _sum: { amount: true },
         });
         const totalPaidOut = Number(paidOut._sum.amount ?? 0);
 
-        // Available for withdrawal = total earnings - total paid out
-        const availableBalance = Math.max(0, totalEarnings - totalPaidOut);
-
-        // Check pending payout requests
+        // Check pending/processing payout requests
         const pendingPayouts = await prisma.driverPayout.aggregate({
             where: { driverId: userId, status: { in: ['PENDING', 'PROCESSING'] } },
             _sum: { amount: true },
         });
         const pendingPayoutsAmount = Number(pendingPayouts._sum.amount ?? 0);
 
-        // Withdrawable = available - pending payout requests
+        // Available balance is the total money that hasn't successfully reached the driver's bank yet
+        const availableBalance = Math.max(0, totalEarnings - totalPaidOut);
+        
+        // Withdrawable balance locks funds that are currently pending/processing to prevent double-withdrawal
         const withdrawableBalance = Math.max(0, availableBalance - pendingPayoutsAmount);
 
         return {
