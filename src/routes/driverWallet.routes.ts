@@ -28,12 +28,12 @@ router.get('/transactions', asyncHandler(async (req: AuthRequest, res: Response)
 router.post('/payout', asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false }); return; }
-    const { amount, method } = req.body;
+    const { amount, method, upiId, bankAccountNumber, bankIfscCode, bankAccountHolderName } = req.body;
     if (!amount || !method) {
         res.status(400).json({ success: false, message: 'Amount and method required' });
         return;
     }
-    const data = await DriverWalletService.requestPayout(userId, amount, method);
+    const data = await DriverWalletService.requestPayout(userId, amount, method, { upiId, bankAccountNumber, bankIfscCode, bankAccountHolderName });
     res.json({ success: true, data });
 }));
 

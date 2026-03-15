@@ -170,7 +170,8 @@ export class DriverWalletService {
     static async requestPayout(
         userId: string,
         amount: number,
-        method: 'BANK' | 'UPI'
+        method: 'BANK' | 'UPI',
+        details?: { upiId?: string; bankAccountNumber?: string; bankIfscCode?: string; bankAccountHolderName?: string }
     ): Promise<{ payoutId: string; status: string; message?: string }> {
         const profile = await prisma.driverProfile.findUnique({
             where: { userId },
@@ -185,11 +186,29 @@ export class DriverWalletService {
 
         if (!profile) throw new AppError('Driver profile not found', 404);
 
+        // Update profile if details provided
+        if (details && (details.upiId || details.bankAccountNumber)) {
+            await prisma.driverProfile.update({
+                where: { userId },
+                data: {
+                    ...(details.upiId && { upiId: details.upiId }),
+                    ...(details.bankAccountNumber && { bankAccountNumber: details.bankAccountNumber }),
+                    ...(details.bankIfscCode && { bankIfscCode: details.bankIfscCode }),
+                    ...(details.bankAccountHolderName && { bankAccountHolderName: details.bankAccountHolderName }),
+                }
+            });
+            // Update local profile object so the rest of the function uses it
+            if (details.upiId) profile.upiId = details.upiId;
+            if (details.bankAccountNumber) profile.bankAccountNumber = details.bankAccountNumber;
+            if (details.bankIfscCode) profile.bankIfscCode = details.bankIfscCode;
+            if (details.bankAccountHolderName) profile.bankAccountHolderName = details.bankAccountHolderName;
+        }
+
         if (method === 'UPI' && !profile.upiId) {
-            throw new AppError('UPI ID not set. Update your profile first.', 400);
+            throw new AppError('UPI ID not set. Please provide a valid UPI ID.', 400);
         }
         if (method === 'BANK' && !profile.bankAccountNumber) {
-            throw new AppError('Bank account not set. Update your profile first.', 400);
+            throw new AppError('Bank account not set. Please provide Bank Details.', 400);
         }
 
         // Calculate available balance
