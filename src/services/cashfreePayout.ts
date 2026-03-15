@@ -242,7 +242,7 @@ export const initiatePayoutTransfer = async (
     return { status: 'ERROR', message: beneResult.message || 'Failed to register beneficiary' };
   }
 
-  // ── Step 2: Initiate transfer ──
+  // ── Step 2: Initiate transfer (include full beneficiary details inline) ──
   const headers = getV2Headers();
 
   const body = {
@@ -252,6 +252,10 @@ export const initiatePayoutTransfer = async (
     remarks: params.remarks || 'DriveMate driver withdrawal',
     beneficiary_details: {
       beneficiary_id: beneficiaryId,
+      beneficiary_name: params.beneName || 'DriveMate Driver',
+      beneficiary_phone: phone || '9999999999',
+      beneficiary_email: params.beneEmail || 'driver@drivemate.app',
+      beneficiary_instrument_details: instrumentDetails,
     },
   };
 
