@@ -53,14 +53,16 @@ export class DriverWalletService {
             totalPaidOut,
             pendingPayoutsAmount,
             payoutMethods: {
-                bank: profile.bankAccountNumber
+                bank: (profile.bankAccountNumber && !profile.bankAccountNumber.startsWith('PEND'))
                     ? {
                         accountNumber: `****${profile.bankAccountNumber.slice(-4)}`,
                         ifsc: profile.bankIfscCode,
                         holderName: profile.bankAccountHolderName,
                     }
                     : null,
-                upi: profile.upiId || null,
+                upiId: (profile.upiId && profile.upiId.trim() && !profile.upiId.startsWith('PEND'))
+                    ? profile.upiId
+                    : null,
             },
         };
     }

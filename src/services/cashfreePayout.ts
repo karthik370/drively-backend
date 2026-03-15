@@ -4,10 +4,13 @@
  * Handles automatic money transfers to drivers via
  * Cashfree Payouts API v1 (directTransfer).
  *
+ * Uses PUBLIC KEY authentication (no IP whitelisting needed).
+ *
  * Separate from cashfree.ts (Payment Gateway for collecting money).
  * This service is for SENDING money to drivers.
  */
 import axios from 'axios';
+import crypto from 'crypto';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 
@@ -33,6 +36,40 @@ const getPayoutConfig = () => {
   return { clientId, clientSecret, env, baseUrl };
 };
 
+// ── RSA Signature for Public Key Auth ──────────────────────────────────────
+
+/**
+ * Generate X-Cf-Signature using RSA public key encryption.
+ * Encrypts "clientId.unixTimestamp" with the public key PEM.
+ * Valid for 10 min (test) / 5 min (production).
+ */
+const generateCfSignature = (clientId: string): string => {
+  const rawKey = process.env.CASHFREE_PAYOUT_PUBLIC_KEY;
+  if (!rawKey) {
+    throw new AppError(
+      'CASHFREE_PAYOUT_PUBLIC_KEY is not set. Download public key from Cashfree Payouts dashboard → Developers → Two-Factor Authentication → Public Key.',
+      500,
+    );
+  }
+
+  // dotenv stores \n as literal "\\n" — convert to real newlines
+  const publicKeyPem = rawKey.replace(/\\n/g, '\n');
+
+  const timestamp = Math.floor(Date.now() / 1000); // UNIX timestamp
+  const dataToSign = `${clientId}.${timestamp}`;
+
+  // RSA encrypt using the public key
+  const encrypted = crypto.publicEncrypt(
+    {
+      key: publicKeyPem,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    Buffer.from(dataToSign),
+  );
+
+  return encrypted.toString('base64');
+};
+
 // ── Token Cache ────────────────────────────────────────────────────────────
 
 let cachedToken: string | null = null;
@@ -41,6 +78,7 @@ let tokenExpiresAt = 0;
 /**
  * Get authorization bearer token — cached for ~4 minutes.
  * POST /payout/v1/authorize
+ * Uses public key signature (X-Cf-Signature) instead of IP whitelisting.
  */
 export const getPayoutAuthToken = async (): Promise<string> => {
   if (cachedToken && Date.now() < tokenExpiresAt) {
@@ -48,6 +86,9 @@ export const getPayoutAuthToken = async (): Promise<string> => {
   }
 
   const { clientId, clientSecret, baseUrl } = getPayoutConfig();
+
+  // Generate RSA signature for public key auth
+  const signature = generateCfSignature(clientId);
 
   try {
     const res = await axios.post(
@@ -57,6 +98,7 @@ export const getPayoutAuthToken = async (): Promise<string> => {
         headers: {
           'x-client-id': clientId,
           'x-client-secret': clientSecret,
+          'X-Cf-Signature': signature,
           'Content-Type': 'application/json',
         },
         timeout: 15_000,
