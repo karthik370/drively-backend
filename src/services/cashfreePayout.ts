@@ -200,8 +200,10 @@ const createBeneficiary = async (
 
 // ────────────────────────────────────────────────────────────────────────────
 // Create Transfer — POST /payout/transfers
-// Flow: Create beneficiary → Then initiate transfer
+// Flow: Create/reuse beneficiary → Wait for propagation → Initiate transfer
 // ────────────────────────────────────────────────────────────────────────────
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const initiatePayoutTransfer = async (
   params: PayoutTransferParams,
@@ -224,11 +226,17 @@ export const initiatePayoutTransfer = async (
     instrumentDetails.bank_ifsc = params.beneIfsc;
   }
 
-  // Sanitize phone to 10 digits
+  // Sanitize and validate phone to 10 digits
   const phone = (params.benePhone || '').replace(/\D/g, '').slice(-10);
-  const beneficiaryId = `bene_${params.transferId}`;
+  if (phone.length !== 10) {
+    return { status: 'ERROR', message: 'Invalid phone number — must be 10 digits' };
+  }
 
-  // ── Step 1: Create beneficiary ──
+  // Use a STABLE beneficiary ID per driver (not per transfer)
+  // This way the beneficiary is created once and reused for all future payouts
+  const beneficiaryId = `bene_driver_${phone}`;
+
+  // ── Step 1: Create or reuse beneficiary ──
   const beneResult = await createBeneficiary(
     baseUrl,
     beneficiaryId,
@@ -242,7 +250,10 @@ export const initiatePayoutTransfer = async (
     return { status: 'ERROR', message: beneResult.message || 'Failed to register beneficiary' };
   }
 
-  // ── Step 2: Initiate transfer (include full beneficiary details inline) ──
+  // Wait for Cashfree to propagate the beneficiary (2 seconds)
+  await delay(2000);
+
+  // ── Step 2: Initiate transfer — ONLY beneficiary_id, no other fields ──
   const headers = getV2Headers();
 
   const body = {
@@ -251,11 +262,7 @@ export const initiatePayoutTransfer = async (
     transfer_mode: params.transferMode,
     remarks: params.remarks || 'DriveMate driver withdrawal',
     beneficiary_details: {
-      beneficiary_id: beneficiaryId,
-      beneficiary_name: params.beneName || 'DriveMate Driver',
-      beneficiary_phone: phone || '9999999999',
-      beneficiary_email: params.beneEmail || 'driver@drivemate.app',
-      beneficiary_instrument_details: instrumentDetails,
+      beneficiary_id: beneficiaryId,  // ONLY the id — no other fields
     },
   };
 
