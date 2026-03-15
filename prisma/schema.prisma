@@ -110,6 +110,7 @@ enum WalletTransactionReason {
   REFUND
   TIP
   ADJUSTMENT
+  REWARD
 }
 
 enum WalletTransactionStatus {

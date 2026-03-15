@@ -11,6 +11,7 @@ import { MatchingService } from './matching.service';
 import { enqueueScheduledBooking } from './scheduledBooking.service';
 import { InvoiceService } from './invoice.service';
 import { PromotionService } from './promotion.service';
+import { RewardsService } from './rewards.service';
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
@@ -1497,6 +1498,27 @@ export class BookingService {
       InvoiceService.ensureInvoiceForBooking({ bookingId: params.bookingId }).catch((error) => {
         logger.warn('Invoice generation failed', { error, bookingId: params.bookingId });
       });
+
+      // Award reward coins to the customer for completing a ride
+      const finalBookingForRewards = completedBooking || booking;
+      const fareForRewards = Number((finalBookingForRewards as any).totalAmount || 0);
+      if (finalBookingForRewards.customerId && fareForRewards > 0) {
+        RewardsService.awardRideCoins(
+          finalBookingForRewards.customerId,
+          params.bookingId,
+          fareForRewards,
+        ).then((coins) => {
+          if (coins > 0) {
+            logger.info('Reward coins awarded', {
+              customerId: finalBookingForRewards.customerId,
+              bookingId: params.bookingId,
+              coins,
+            });
+          }
+        }).catch((error) => {
+          logger.warn('Failed to award reward coins', { error, bookingId: params.bookingId });
+        });
+      }
     }
 
 

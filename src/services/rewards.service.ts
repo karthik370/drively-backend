@@ -1,5 +1,7 @@
+import { Prisma, WalletTransactionType, WalletTransactionReason, WalletTransactionStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
+import { logger } from '../utils/logger';
 
 const COINS_PER_RIDE = 10;           // Earn 10 coins per completed ride
 const COINS_PER_100_SPENT = 5;       // Earn 5 coins per ₹100 spent
@@ -88,32 +90,83 @@ export class RewardsService {
     }
 
     /**
-     * Redeem coins for discount on a booking
+     * Redeem coins for wallet credit
+     * Coins are deducted and equivalent ₹ is added to customer wallet
      */
-    static async redeemCoins(userId: string, coinsToSpend: number, bookingId: string): Promise<{
+    static async redeemCoins(userId: string, coinsToSpend: number, bookingId?: string): Promise<{
         coinsSpent: number;
         discountAmount: number;
+        walletBalance: number;
     }> {
         const balance = await this.getBalance(userId);
         if (coinsToSpend > balance) {
             throw new AppError(`Insufficient coins. Balance: ${balance}, requested: ${coinsToSpend}`, 400);
         }
 
-        const discountAmount = Math.floor(coinsToSpend / COINS_TO_RUPEE_RATIO);
-        const newBalance = balance - coinsToSpend;
+        if (coinsToSpend < COINS_TO_RUPEE_RATIO) {
+            throw new AppError(`Minimum ${COINS_TO_RUPEE_RATIO} coins required to redeem (= ₹1)`, 400);
+        }
 
-        await prisma.rewardsCoin.create({
-            data: {
-                userId,
-                amount: -coinsToSpend,
-                type: 'SPENT',
-                reason: `Redeemed ${coinsToSpend} coins for ₹${discountAmount} discount on ride`,
-                bookingId,
-                balanceAfter: newBalance,
-            },
+        const discountAmount = Math.floor(coinsToSpend / COINS_TO_RUPEE_RATIO);
+        const newCoinBalance = balance - coinsToSpend;
+
+        // Use transaction to atomically deduct coins AND credit wallet
+        const result = await prisma.$transaction(async (tx) => {
+            // 1. Record coin spend
+            await tx.rewardsCoin.create({
+                data: {
+                    userId,
+                    amount: -coinsToSpend,
+                    type: 'SPENT',
+                    reason: `Redeemed ${coinsToSpend} coins for ₹${discountAmount} wallet credit`,
+                    bookingId: bookingId || undefined,
+                    balanceAfter: newCoinBalance,
+                },
+            });
+
+            // 2. Credit customer wallet
+            const profile = await tx.customerProfile.findUnique({
+                where: { userId },
+                select: { walletBalance: true },
+            });
+
+            if (!profile) {
+                throw new AppError('Customer profile not found', 404);
+            }
+
+            const creditAmount = new Prisma.Decimal(discountAmount);
+            const nextWalletBalance = profile.walletBalance.plus(creditAmount);
+
+            await tx.customerProfile.update({
+                where: { userId },
+                data: { walletBalance: nextWalletBalance },
+            });
+
+            // 3. Record wallet transaction
+            await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    type: WalletTransactionType.CREDIT,
+                    reason: WalletTransactionReason.REWARD,
+                    status: WalletTransactionStatus.COMPLETED,
+                    amount: creditAmount,
+                    balanceAfter: nextWalletBalance,
+                    bookingId: bookingId || undefined,
+                    meta: {
+                        coinsSpent: coinsToSpend,
+                        coinBalance: newCoinBalance,
+                    } as any,
+                },
+            });
+
+            return { walletBalance: Number(nextWalletBalance) };
         });
 
-        return { coinsSpent: coinsToSpend, discountAmount };
+        logger.info('Coins redeemed for wallet credit', {
+            userId, coinsSpent: coinsToSpend, discountAmount, newCoinBalance,
+        });
+
+        return { coinsSpent: coinsToSpend, discountAmount, walletBalance: result.walletBalance };
     }
 
     /**
