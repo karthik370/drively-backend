@@ -13,6 +13,7 @@ import { InvoiceService } from './invoice.service';
 import { PromotionService } from './promotion.service';
 import { RewardsService } from './rewards.service';
 import { ReferralService } from './referral.service';
+import { DiscountService } from './discount.service';
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
@@ -515,15 +516,29 @@ export class BookingService {
     const commissionPct = Number(process.env.COMMISSION_PERCENTAGE || 0);
     const commissionPercentage = clamp(commissionPct, 0, 100);
 
+    // ── Apply membership + streak discounts ──
+    const memberDiscounts = await DiscountService.applyDiscounts(params.customerId, fare.total);
+
     const EXPERIENCED_DRIVER_FEE = 75;
-    const requireExperienced = Boolean(params.requireExperienced);
+    // Premium members get experienced driver automatically
+    const requireExperienced = Boolean(params.requireExperienced) || memberDiscounts.requireExperienced;
     const experiencedDriverFee = requireExperienced ? EXPERIENCED_DRIVER_FEE : 0;
 
-    const payableTotal = (promo ? promo.finalAmount : fare.total) + experiencedDriverFee;
-    const discountAmount = promo ? promo.discountAmount : 0;
+    const promoDiscountAmount = promo ? promo.discountAmount : 0;
+    const discountAmount = promoDiscountAmount + memberDiscounts.totalDiscount;
+    const payableTotal = Math.max(0, Math.round((fare.total - discountAmount + experiencedDriverFee) * 100) / 100);
 
     const platformCommission = Math.round((payableTotal * commissionPercentage) / 100);
     const driverEarnings = Math.max(0, payableTotal - platformCommission);
+
+    const discountBreakdown = {
+      promoDiscount: promoDiscountAmount,
+      membershipDiscount: memberDiscounts.membershipDiscount,
+      streakDiscount: memberDiscounts.streakDiscount,
+      membershipType: memberDiscounts.breakdown.membershipType,
+      streakRides: memberDiscounts.breakdown.streakRides,
+      streakPct: memberDiscounts.breakdown.streakPct,
+    };
 
     const booking = await prisma.$transaction(async (tx) => {
       const created = await tx.booking.create({
@@ -545,7 +560,7 @@ export class BookingService {
           estimatedDistance: distanceMeters ? distanceMeters / 1000 : null,
           estimatedDuration: durationSeconds ? Math.round(durationSeconds / 60) : null,
           routePolyline: polyline,
-          pricingBreakdown: fare.breakdown,
+          pricingBreakdown: { ...(fare.breakdown as any), discounts: discountBreakdown },
           totalAmount: payableTotal,
           promoCodeId: promo ? promo.promotionId : null,
           discountAmount,

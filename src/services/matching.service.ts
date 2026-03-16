@@ -169,6 +169,37 @@ export class MatchingService {
       transmissionType: (booking as any).transmissionType ?? undefined,
     });
 
+    // ── Favorite driver priority: notify favorites first ──
+    try {
+      const customerProfile = await prisma.customerProfile.findUnique({
+        where: { userId: booking.customerId },
+        select: { favoriteDriverIds: true },
+      });
+      const favIds = Array.isArray(customerProfile?.favoriteDriverIds) ? customerProfile.favoriteDriverIds : [];
+      if (favIds.length > 0) {
+        // Check which favorites are online and available
+        const onlineFavs = await prisma.driverProfile.findMany({
+          where: {
+            userId: { in: favIds },
+            isOnline: true,
+            isAvailable: true,
+            ...(requireExperienced ? { isExperienced: true } : {}),
+          },
+          select: { userId: true },
+        });
+        const favDriverIds = onlineFavs.map((d: any) => String(d.userId)).filter(Boolean);
+        if (favDriverIds.length > 0) {
+          await sendExpoPushNotification({
+            userIds: favDriverIds,
+            title: '⭐ Favorite customer booking!',
+            body: booking.pickupAddress ? `Pickup: ${String(booking.pickupAddress)}` : 'A customer who favorited you needs a ride!',
+            data: { kind: 'favorite_booking_offer', bookingId: String(bookingId) },
+          });
+        }
+      }
+    } catch {
+    }
+
     try {
       const online = await prisma.driverProfile.findMany({
         where: {

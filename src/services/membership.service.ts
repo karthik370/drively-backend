@@ -199,7 +199,7 @@ export class MembershipService {
         {
           type: MembershipType.BASIC,
           title: 'Basic',
-          description: 'Basic membership benefits',
+          description: 'Get ₹30 off on every ride you book. Save more the more you ride!',
           price: new Prisma.Decimal(199),
           durationDays: 30,
           isActive: true,
@@ -207,7 +207,7 @@ export class MembershipService {
         {
           type: MembershipType.PREMIUM,
           title: 'Premium',
-          description: 'Premium membership benefits',
+          description: 'Get ₹50 off on every ride + free experienced driver on all bookings. The ultimate ride experience.',
           price: new Prisma.Decimal(399),
           durationDays: 30,
           isActive: true,

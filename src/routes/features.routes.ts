@@ -5,6 +5,8 @@ import { asyncHandler } from '../middleware/errorHandler';
 import { ReferralService } from '../services/referral.service';
 import { IncentiveService } from '../services/incentive.service';
 import { RewardsService } from '../services/rewards.service';
+import { DiscountService } from '../services/discount.service';
+import { FavoriteDriverService } from '../services/favoriteDriver.service';
 
 const router = Router();
 router.use(authenticate);
@@ -77,6 +79,46 @@ router.post('/rewards/redeem', asyncHandler(async (req: AuthRequest, res: Respon
     const { coins, bookingId } = req.body;
     const data = await RewardsService.redeemCoins(userId, coins, bookingId);
     res.json({ success: true, data });
+}));
+
+// ── Discount Preview ────────────────────────────────────────────────
+
+router.get('/discounts/preview', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    const amount = Number(req.query.amount || 0);
+    const data = await DiscountService.getDiscountPreview(userId, amount);
+    res.json({ success: true, data });
+}));
+
+// ── Favorite Drivers ────────────────────────────────────────────────
+
+router.get('/favorite-drivers', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    const data = await FavoriteDriverService.getFavoriteDrivers(userId);
+    res.json({ success: true, data });
+}));
+
+router.post('/favorite-drivers/:driverId', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    const data = await FavoriteDriverService.addFavoriteDriver(userId, req.params.driverId);
+    res.json({ success: true, data });
+}));
+
+router.delete('/favorite-drivers/:driverId', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    const data = await FavoriteDriverService.removeFavoriteDriver(userId, req.params.driverId);
+    res.json({ success: true, data });
+}));
+
+router.get('/favorite-drivers/:driverId/check', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    const isFavorite = await FavoriteDriverService.isFavorite(userId, req.params.driverId);
+    res.json({ success: true, data: { isFavorite } });
 }));
 
 export default router;
