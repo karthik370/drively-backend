@@ -11,7 +11,7 @@ interface SignupData {
   phoneNumber: string;
   firstName: string;
   lastName: string;
-  email?: string;
+  email: string;
   password?: string;
   userType: UserType;
   upiId?: string;
@@ -36,6 +36,18 @@ export class AuthService {
     if (data.userType === UserType.BOTH) {
       throw new AppError('User type BOTH is not supported. Please choose CUSTOMER or DRIVER.', 400);
     }
+
+    // Email is compulsory for all signups — needed for Cashfree payment receipts
+    if (!data.email || !data.email.trim()) {
+      throw new AppError('Email address is required', 400);
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(data.email.trim())) {
+      throw new AppError('Please provide a valid email address', 400);
+    }
+
+    data.email = data.email.trim().toLowerCase();
 
     const existingUser = await prisma.user.findUnique({
       where: { phoneNumber: data.phoneNumber },
