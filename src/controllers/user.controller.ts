@@ -48,6 +48,7 @@ export class UserController {
     const firstName = typeof (req.body as any)?.firstName === 'string' ? (req.body as any).firstName.trim() : '';
     const lastName = typeof (req.body as any)?.lastName === 'string' ? (req.body as any).lastName.trim() : '';
     const profileImage = typeof (req.body as any)?.profileImage === 'string' ? (req.body as any).profileImage.trim() : undefined;
+    const emailRaw = typeof (req.body as any)?.email === 'string' ? (req.body as any).email.trim().toLowerCase() : null;
 
     if (!firstName || !lastName) {
       throw new AppError('firstName and lastName are required', 400);
@@ -61,12 +62,34 @@ export class UserController {
       throw new AppError('Only drivers can update profile photo', 403);
     }
 
+    // Validate and deduplicate email if being changed
+    let newEmail: string | undefined;
+    if (emailRaw) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(emailRaw)) {
+        throw new AppError('Please provide a valid email address', 400);
+      }
+
+      // Check if email is used by a different account
+      const existingWithEmail = await prisma.user.findUnique({
+        where: { email: emailRaw },
+        select: { id: true },
+      });
+
+      if (existingWithEmail && existingWithEmail.id !== req.user.id) {
+        throw new AppError('This email address is already in use by another account', 409);
+      }
+
+      newEmail = emailRaw;
+    }
+
     const updated = await prisma.user.update({
       where: { id: req.user.id },
       data: {
         firstName,
         lastName,
         profileImage: profileImage ? profileImage : undefined,
+        ...(newEmail !== undefined ? { email: newEmail } : {}),
       } as any,
       select: {
         id: true,
