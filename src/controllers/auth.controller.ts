@@ -491,4 +491,14 @@ export class AuthController {
       data: result,
     });
   });
+  static adminLogin = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const schema = Joi.object({
+      phoneNumber: Joi.string().pattern(/^\+?[1-9]\d{1,14}$/).required(),
+      adminSecretKey: Joi.string().min(1).required(),
+    });
+    const { error, value } = schema.validate(req.body);
+    if (error) throw new AppError(error.details[0].message, 400);
+    const result = await AuthService.adminLogin(value);
+    res.status(200).json({ success: true, message: 'Admin login successful', data: result });
+  });
 }

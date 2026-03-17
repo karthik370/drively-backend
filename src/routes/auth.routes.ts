@@ -14,5 +14,7 @@ router.post('/logout', authenticate, AuthController.logout);
 router.post('/logout-all-devices', authenticate, AuthController.logoutAllDevices);
 router.get('/me', authenticate, AuthController.getMe);
 router.post('/social-login', AuthController.socialLogin);
+// Admin direct login — no OTP, validated by ADMIN_SECRET_KEY env var
+router.post('/admin/login', AuthController.adminLogin);
 
 export default router;

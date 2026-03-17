@@ -401,6 +401,73 @@ export class AuthService {
     };
   }
 
+  static async adminLogin(params: { phoneNumber: string; adminSecretKey: string }): Promise<TokenResponse> {
+    // 1. Verify the admin secret key
+    const configuredSecret = String(process.env.ADMIN_SECRET_KEY || '').trim();
+    if (!configuredSecret) {
+      throw new AppError('Admin direct login is not configured. Set ADMIN_SECRET_KEY in backend .env', 503);
+    }
+    if (params.adminSecretKey !== configuredSecret) {
+      throw new AppError('Invalid admin credentials', 401);
+    }
+
+    // 2. Verify phone is in the admin allowlist
+    const normalizePhone = (p: string) => String(p || '').replace(/\D/g, '').slice(-10);
+    const adminAllowlistRaw = String(
+      process.env.ADMIN_PHONE_NUMBERS ||
+        process.env.ADMIN_PHONES ||
+        process.env.ADMIN_PHONE ||
+        process.env.ADMIN_ALLOWLIST ||
+        ''
+    ).trim();
+    const allowedPhones = adminAllowlistRaw
+      .split(/[\s,;]+/g)
+      .map((v) => normalizePhone(v))
+      .filter(Boolean);
+    const callerPhone = normalizePhone(params.phoneNumber);
+    if (!allowedPhones.includes(callerPhone)) {
+      throw new AppError('This phone number is not authorized as an admin', 403);
+    }
+
+    // 3. Find user (must already exist)
+    const user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { phoneNumber: params.phoneNumber },
+          { phoneNumber: { endsWith: callerPhone } as any },
+        ],
+      },
+    });
+    if (!user) {
+      throw new AppError('Admin user account not found. Please sign up first.', 404);
+    }
+    if (!user.isActive) {
+      throw new AppError('Account has been deactivated', 403);
+    }
+
+    // 4. Mark verified and generate tokens (no OTP needed)
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { isVerified: true, phoneVerified: true, lastLoginAt: new Date() },
+    });
+
+    const { generateAccessToken, generateRefreshToken } = await import('../utils/jwt');
+    const tokenPayload = { ...user, email: user.email ?? undefined };
+    const accessToken = generateAccessToken(tokenPayload as any);
+    const refreshToken = generateRefreshToken(tokenPayload as any);
+
+    await prisma.session.create({
+      data: {
+        userId: user.id,
+        refreshToken,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    const { password: _, ...userWithoutPassword } = user as any;
+    return { accessToken, refreshToken, user: userWithoutPassword };
+  }
+
   private static async generateReferralCode(_userId: string, userType: UserType): Promise<string> {
     const prefix = userType === UserType.DRIVER ? 'DRV' : 'CUS';
     const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();

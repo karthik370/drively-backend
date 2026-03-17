@@ -2,6 +2,8 @@ import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
 import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId } from './cashfree';
+import { getSocketServer } from '../socket/io';
+import { logger } from '../utils/logger';
 
 /** Credit driver's wallet after an online payment is confirmed */
 const creditDriverForBooking = async (bookingId: string) => {
@@ -138,6 +140,7 @@ export class PaymentService {
       select: {
         id: true,
         customerId: true,
+        driverId: true,
         paymentStatus: true,
       },
     });
@@ -146,7 +149,10 @@ export class PaymentService {
       throw new AppError('Booking not found', 404);
     }
 
-    if (String(booking.customerId) !== String(params.userId)) {
+    // Allow both customer AND driver to verify (driver needs it for QR-based flows)
+    const isCustomer = String(booking.customerId) === String(params.userId);
+    const isDriver = booking.driverId && String(booking.driverId) === String(params.userId);
+    if (!isCustomer && !isDriver) {
       throw new AppError('Not authorized for this booking', 403);
     }
 
@@ -202,6 +208,30 @@ export class PaymentService {
     // Credit driver wallet for online payment
     if (!result.alreadyPaid) {
       await creditDriverForBooking(booking.id);
+
+      // Notify both parties via socket immediately — no polling needed
+      try {
+        const io = getSocketServer();
+        const bookingFull = await prisma.booking.findUnique({
+          where: { id: booking.id },
+          select: { customerId: true, driverId: true, totalAmount: true },
+        });
+        const payload = {
+          bookingId: booking.id,
+          paymentStatus: 'PAID',
+          amount: Number(bookingFull?.totalAmount || 0),
+        };
+        if (bookingFull?.driverId) {
+          io.to(bookingFull.driverId).emit('payment_confirmed', payload);
+          logger.info(`[Payment] Notified driver ${bookingFull.driverId} of payment`);
+        }
+        if (bookingFull?.customerId) {
+          io.to(bookingFull.customerId).emit('payment_confirmed', payload);
+          logger.info(`[Payment] Notified customer ${bookingFull.customerId} of payment`);
+        }
+      } catch (socketErr) {
+        logger.warn('[Payment] Socket emit failed (non-critical)', { socketErr });
+      }
     }
 
     return {
