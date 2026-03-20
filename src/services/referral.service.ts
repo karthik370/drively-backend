@@ -7,7 +7,7 @@ import { sendExpoPushNotification } from './expoPush.service';
 
 // ── Reward amounts ──────────────────────────────────────────────────────────
 const REFERRAL_REWARDS = {
-    DRIVER:   { referrer: 500, referred: 250 },   // ₹500 for referrer, ₹250 for new driver
+    DRIVER:   { referrer: 100, referred: 75  },   // ₹100 for referrer, ₹75 for new driver
     CUSTOMER: { referrer: 100, referred: 50  },    // ₹100 for referrer, ₹50 for new customer
 };
 

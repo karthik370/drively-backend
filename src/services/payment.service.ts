@@ -311,6 +311,106 @@ export class PaymentService {
     return { received: true };
   }
 
+  /**
+   * Driver marks a completed trip as "cash collected".
+   * • Overrides the original paymentMethod → CASH
+   * • Sets paymentStatus → PAID
+   * • Does NOT credit driver wallet (driver already has the physical cash)
+   * • Notifies both driver and customer via socket
+   */
+  static async collectCash(params: { driverId: string; bookingId: string }) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: params.bookingId },
+      select: {
+        id: true,
+        customerId: true,
+        driverId: true,
+        totalAmount: true,
+        paymentStatus: true,
+        paymentMethod: true,
+        status: true,
+      },
+    });
+
+    if (!booking) {
+      throw new AppError('Booking not found', 404);
+    }
+
+    if (!booking.driverId || String(booking.driverId) !== String(params.driverId)) {
+      throw new AppError('Only the assigned driver can collect cash', 403);
+    }
+
+    if (booking.status !== 'COMPLETED') {
+      throw new AppError('Trip must be completed before collecting cash', 400);
+    }
+
+    if (booking.paymentStatus === PaymentStatus.PAID) {
+      return { alreadyPaid: true, bookingId: booking.id };
+    }
+
+    const now = new Date();
+
+    await prisma.$transaction(async (tx) => {
+      // Create a payment record for cash collection
+      const payment = await tx.payment.create({
+        data: {
+          bookingId: booking.id,
+          userId: params.driverId,
+          amount: booking.totalAmount,
+          paymentMethod: PaymentMethod.CASH,
+          status: PaymentStatus.PAID,
+          processedAt: now,
+          gatewayResponse: {
+            type: 'CASH_COLLECTED',
+            collectedBy: params.driverId,
+            collectedAt: now.toISOString(),
+          } as any,
+        },
+        select: { id: true },
+      });
+
+      // Update booking: switch to CASH, mark as PAID
+      await tx.booking.update({
+        where: { id: booking.id },
+        data: {
+          paymentMethod: PaymentMethod.CASH,
+          paymentStatus: PaymentStatus.PAID,
+          paymentId: payment.id,
+        },
+      });
+    });
+
+    // NOTE: We do NOT call creditDriverForBooking here because the
+    // driver already has the physical cash — no wallet credit needed.
+
+    // Notify both parties via socket
+    try {
+      const io = getSocketServer();
+      const payload = {
+        bookingId: booking.id,
+        paymentStatus: 'PAID',
+        paymentMethod: 'CASH',
+        cashCollected: true,
+        amount: Number(booking.totalAmount || 0),
+      };
+      if (booking.driverId) {
+        io.to(booking.driverId).emit('payment_confirmed', payload);
+      }
+      if (booking.customerId) {
+        io.to(booking.customerId).emit('payment_confirmed', payload);
+      }
+    } catch (socketErr) {
+      logger.warn('[Payment] Cash collect socket emit failed (non-critical)', { socketErr });
+    }
+
+    return {
+      bookingId: booking.id,
+      paymentStatus: PaymentStatus.PAID,
+      paymentMethod: PaymentMethod.CASH,
+      cashCollected: true,
+    };
+  }
+
   static async getBookingPaymentStatus(params: { userId: string; bookingId: string }) {
     const booking = await prisma.booking.findUnique({
       where: { id: params.bookingId },

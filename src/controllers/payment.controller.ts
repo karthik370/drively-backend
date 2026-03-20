@@ -102,6 +102,26 @@ export class PaymentController {
       data,
     });
   });
+  static collectCash = asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (!req.user) {
+      throw new AppError('Not authenticated', 401);
+    }
+
+    const bookingId = String(req.body?.bookingId || '');
+    if (!bookingId) {
+      throw new AppError('bookingId is required', 400);
+    }
+
+    const result = await PaymentService.collectCash({
+      driverId: req.user.id,
+      bookingId,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
 }
 
 export default PaymentController;

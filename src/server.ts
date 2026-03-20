@@ -40,6 +40,8 @@ import adminRoutes from './routes/admin.routes';
 import featuresRoutes from './routes/features.routes';
 import driverWalletRoutes from './routes/driverWallet.routes';
 import subscriptionRoutes from './routes/subscription.routes';
+import tripPhotoRoutes from './routes/tripPhoto.routes';
+import badgeRoutes from './routes/badge.routes';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
@@ -196,6 +198,8 @@ app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 app.use(`/api/${API_VERSION}/features`, featuresRoutes);
 app.use(`/api/${API_VERSION}/driver-wallet`, driverWalletRoutes);
 app.use(`/api/${API_VERSION}/driver/subscription`, subscriptionRoutes);
+app.use(`/api/${API_VERSION}/trip-photos`, tripPhotoRoutes);
+app.use(`/api/${API_VERSION}/badges`, badgeRoutes);
 
 swaggerDocs(app, Number(PORT));
 
@@ -288,6 +292,17 @@ const startServer = async () => {
     void initScheduledBookingProcessor().catch((error) => {
       logger.error('Failed to start scheduled booking processor:', error);
     });
+
+    // Seed default driver badges
+    void (async () => {
+      try {
+        const { BadgeService } = await import('./services/badge.service');
+        await BadgeService.seedDefaultBadges();
+        logger.info('✅ Default badges seeded');
+      } catch (error) {
+        logger.error('Failed to seed default badges:', error);
+      }
+    })();
   } catch (error) {
     logger.error('Failed to start server:', error);
     process.exit(1);

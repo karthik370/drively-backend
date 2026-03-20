@@ -11,5 +11,6 @@ router.use(authenticate);
 router.post('/orders', PaymentController.createOrder);
 router.post('/verify', requireCustomerOrOfflineDriver, PaymentController.verifyPayment);
 router.get('/status/:bookingId', PaymentController.getBookingPaymentStatus);
+router.post('/collect-cash', PaymentController.collectCash);
 
 export default router;

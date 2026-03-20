@@ -462,6 +462,7 @@ model Booking {
   supportTickets        SupportTicket[]
   emergencies           Emergency[]
   driverRefund          DriverRefund?
+  tripPhotos            TripPhoto[]
 
   @@index([customerId])
   @@index([driverId])
@@ -1115,3 +1116,70 @@ model RewardsCoin {
   @@map("rewards_coins")
 }
 
+// ─── Trip Photo Capture ──────────────────────────────────────────────────────
+model TripPhoto {
+  id          String   @id @default(uuid())
+  bookingId   String
+  booking     Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  uploadedBy  String
+  phase       String   @db.VarChar(10) // BEFORE | AFTER
+  imageUrl    String   @db.Text
+  label       String?  @db.VarChar(50) // front, back, left, right
+  latitude    Decimal? @db.Decimal(10, 8)
+  longitude   Decimal? @db.Decimal(11, 8)
+  capturedAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([bookingId])
+  @@index([bookingId, phase])
+  @@index([uploadedBy])
+  @@map("trip_photos")
+}
+
+// ─── Driver Skill Badges ─────────────────────────────────────────────────────
+model BadgeDefinition {
+  id           String        @id @default(uuid())
+  slug         String        @unique @db.VarChar(50)
+  title        String        @db.VarChar(100)
+  description  String        @db.Text
+  icon         String        @db.VarChar(50)
+  color        String        @db.VarChar(20)
+  category     String        @db.VarChar(50)
+  isActive     Boolean       @default(true)
+  sortOrder    Int           @default(0)
+  createdAt    DateTime      @default(now())
+
+  quiz         BadgeQuiz?
+  driverBadges DriverBadge[]
+
+  @@index([isActive])
+  @@index([category])
+  @@map("badge_definitions")
+}
+
+model BadgeQuiz {
+  id           String          @id @default(uuid())
+  badgeId      String          @unique
+  badge        BadgeDefinition @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  title        String          @db.VarChar(200)
+  questions    Json
+  passingScore Int             @default(70)
+  timeLimitSec Int             @default(300)
+  createdAt    DateTime        @default(now())
+
+  @@map("badge_quizzes")
+}
+
+model DriverBadge {
+  id         String          @id @default(uuid())
+  driverId   String
+  badgeId    String
+  badge      BadgeDefinition @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  quizScore  Int?
+  earnedAt   DateTime        @default(now())
+
+  @@unique([driverId, badgeId])
+  @@index([driverId])
+  @@index([badgeId])
+  @@map("driver_badges")
+}
