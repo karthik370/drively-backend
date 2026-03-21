@@ -223,7 +223,12 @@ export const initiatePayoutTransfer = async (
     if (!params.beneVpa) {
       return { status: 'ERROR', message: 'UPI VPA is required for UPI transfers' };
     }
-    instrumentDetails.vpa = params.beneVpa;
+    // Validate VPA format — must contain '@' (e.g., user@upi, 9999999999@ybl)
+    const vpa = params.beneVpa.trim();
+    if (!vpa.includes('@') || vpa.split('@').length !== 2 || !vpa.split('@')[1]) {
+      return { status: 'ERROR', message: `Invalid UPI ID "${vpa}". Must be in format like yourname@upi or 9999999999@ybl` };
+    }
+    instrumentDetails.vpa = vpa;
   } else {
     if (!params.beneBankAccount || !params.beneIfsc) {
       return { status: 'ERROR', message: 'Bank account number and IFSC are required' };

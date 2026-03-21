@@ -213,6 +213,9 @@ export class DriverWalletService {
         if (method === 'UPI' && !profile.upiId) {
             throw new AppError('UPI ID not set. Please provide a valid UPI ID.', 400);
         }
+        if (method === 'UPI' && profile.upiId && !profile.upiId.includes('@')) {
+            throw new AppError('Invalid UPI ID format. Must be like yourname@upi or 9999999999@ybl', 400);
+        }
         if (method === 'BANK' && !profile.bankAccountNumber) {
             throw new AppError('Bank account not set. Please provide Bank Details.', 400);
         }
