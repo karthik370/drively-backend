@@ -188,22 +188,8 @@ const createBeneficiary = async (
   }
 };
 
-const deleteBeneficiary = async (baseUrl: string, beneficiaryId: string): Promise<boolean> => {
-  try {
-    await axios.delete(`${baseUrl}/beneficiary/${beneficiaryId}`, {
-      headers: getV2Headers(),
-      timeout: 10_000,
-    });
-    logger.info('Cashfree V2 beneficiary deleted', { beneficiaryId });
-    return true;
-  } catch (err: any) {
-    logger.warn('Cashfree V2 delete beneficiary failed (non-fatal)', {
-      beneficiaryId,
-      error: err?.response?.data?.message || err?.message,
-    });
-    return false;
-  }
-};
+// deleteBeneficiary removed — beneficiary IDs now include an instrument hash,
+// so each VPA/bank combination gets its own unique beneficiary automatically.
 
 
 
@@ -242,11 +228,16 @@ export const initiatePayoutTransfer = async (
     return { status: 'ERROR', message: 'Invalid phone number — must be 10 digits' };
   }
 
-  // Stable beneficiary ID per driver UUID (UUID without dashes = 32 chars + "bene_" = 37)
-  const beneficiaryId = `bene_${params.driverId.replace(/-/g, '')}`;
+  // Beneficiary ID includes a hash of instrument details so each VPA/bank gets its own ID.
+  // This avoids Cashfree's async-delete caching issue where a deleted beneficiary still
+  // returns 409 with stale VPA/bank data.
+  const instrumentKey = Object.values(instrumentDetails).sort().join('|');
+  const instrumentHash = crypto.createHash('md5').update(instrumentKey).digest('hex').slice(0, 8);
+  const driverSlug = params.driverId.replace(/-/g, '').slice(0, 24);
+  const beneficiaryId = `bene_${driverSlug}_${instrumentHash}`;
 
   // ── Step 1: Create or reuse beneficiary ──
-  let beneResult = await createBeneficiary(
+  const beneResult = await createBeneficiary(
     baseUrl, beneficiaryId, params.beneName, phone,
     params.beneEmail || 'driver@drivemate.app', instrumentDetails,
   );
@@ -255,22 +246,7 @@ export const initiatePayoutTransfer = async (
   if (!beneResult.success) {
     return { status: 'ERROR', message: beneResult.message || 'Failed to register beneficiary' };
   }
-
-  // If already exists AND driver changed their details → delete + recreate
-  if (beneResult.alreadyExists && params.forceRecreate) {
-    logger.info('Beneficiary exists + forceRecreate → deleting and recreating', { beneficiaryId });
-    await deleteBeneficiary(baseUrl, beneficiaryId);
-    await new Promise(r => setTimeout(r, 1000));
-
-    beneResult = await createBeneficiary(
-      baseUrl, beneficiaryId, params.beneName, phone,
-      params.beneEmail || 'driver@drivemate.app', instrumentDetails,
-    );
-
-    if (!beneResult.success) {
-      return { status: 'ERROR', message: beneResult.message || 'Failed to update beneficiary' };
-    }
-  }
+  // 409 = already exists with same instrument details → safe to reuse
 
   // ── Step 2: Proceed to transfer ──
   // The POST /beneficiary response already returns beneficiary_status: VERIFIED
