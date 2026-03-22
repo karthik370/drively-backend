@@ -168,12 +168,17 @@ export class DriverController {
       throw new AppError('Not authenticated', 401);
     }
 
-    const licenseNumber = typeof (req.body as any)?.licenseNumber === 'string' ? (req.body as any).licenseNumber.trim() : '';
-    const aadhaarNumber = typeof (req.body as any)?.aadhaarNumber === 'string' ? (req.body as any).aadhaarNumber.trim() : '';
-    const panNumber = typeof (req.body as any)?.panNumber === 'string' ? (req.body as any).panNumber.trim() : '';
+    // Only use text fields if the frontend actually sends non-empty values.
+    // If empty/missing, keep the existing unique placeholder set during signup
+    // to avoid unique-constraint collisions across drivers.
+    const licenseNumberRaw = typeof (req.body as any)?.licenseNumber === 'string' ? (req.body as any).licenseNumber.trim() : '';
+    const aadhaarNumberRaw = typeof (req.body as any)?.aadhaarNumber === 'string' ? (req.body as any).aadhaarNumber.trim() : '';
+    const panNumberRaw = typeof (req.body as any)?.panNumber === 'string' ? (req.body as any).panNumber.trim() : '';
 
     const licenseExpiryDateRaw = (req.body as any)?.licenseExpiryDate;
-    const licenseExpiryDate = new Date(String(licenseExpiryDateRaw || ''));
+    const licenseExpiryDate = licenseExpiryDateRaw
+      ? new Date(String(licenseExpiryDateRaw))
+      : null;
 
     const licenseImageUrl = typeof (req.body as any)?.licenseImageUrl === 'string' ? (req.body as any).licenseImageUrl.trim() : '';
     const aadhaarImageUrl = typeof (req.body as any)?.aadhaarImageUrl === 'string' ? (req.body as any).aadhaarImageUrl.trim() : '';
@@ -189,7 +194,7 @@ export class DriverController {
       throw new AppError('Missing required selfie', 400);
     }
 
-    if (Number.isNaN(licenseExpiryDate.getTime())) {
+    if (licenseExpiryDate && Number.isNaN(licenseExpiryDate.getTime())) {
       throw new AppError('Invalid licenseExpiryDate', 400);
     }
 
@@ -197,6 +202,24 @@ export class DriverController {
     if (!current) {
       throw new AppError('Driver profile not found', 404);
     }
+
+    // Build update payload — only overwrite unique fields if non-empty values provided
+    const profileUpdate: Record<string, any> = {
+      licenseImageUrl,
+      aadhaarImageUrl,
+      panImageUrl,
+      documentsVerified: false,
+      backgroundCheckStatus: VerificationStatus.PENDING,
+    };
+
+    if (licenseExpiryDate) {
+      profileUpdate.licenseExpiryDate = licenseExpiryDate;
+    }
+
+    // Only overwrite unique text fields if the frontend actually sent them
+    if (licenseNumberRaw) profileUpdate.licenseNumber = licenseNumberRaw;
+    if (aadhaarNumberRaw) profileUpdate.aadhaarNumber = aadhaarNumberRaw;
+    if (panNumberRaw) profileUpdate.panNumber = panNumberRaw;
 
     const updated = await prisma.$transaction(async (tx) => {
       await tx.user.update({
@@ -206,17 +229,7 @@ export class DriverController {
 
       return tx.driverProfile.update({
         where: { userId: req.user!.id },
-        data: {
-          licenseNumber,
-          licenseExpiryDate,
-          licenseImageUrl,
-          aadhaarNumber,
-          aadhaarImageUrl,
-          panNumber,
-          panImageUrl,
-          documentsVerified: false,
-          backgroundCheckStatus: VerificationStatus.PENDING,
-        } as any,
+        data: profileUpdate as any,
         select: {
           userId: true,
           documentsVerified: true,

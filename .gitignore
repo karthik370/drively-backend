@@ -4,7 +4,15 @@ node_modules/
 # Environment variables (CRITICAL: Never commit your actual .env file)
 .env
 .env.*.local
-.env.example
+.env.local
+.env.production
+!.env.example
+
+# Service accounts & private keys
+*service-account*.json
+*.pem
+*.key
+
 # Build output
 dist/
 build/
