@@ -193,17 +193,17 @@ export const getRoute = async (
       return fallback('No valid routes in Google response');
     }
 
-    // Reject absurdly long routes (> 2.5x straight-line distance)
-    const maxReasonableMeters = Math.max(5000, straightLineMeters * 2.5);
+    // Reject absurdly long routes (> 5x straight-line distance)
+    // Indian roads can be 3-4x straight-line due to one-ways, flyovers, diversions
+    const maxReasonableMeters = Math.max(10000, straightLineMeters * 5);
     const reasonableCandidates = candidates.filter(c => c.distance <= maxReasonableMeters);
     const finalCandidates = reasonableCandidates.length ? reasonableCandidates : candidates;
 
     if (!reasonableCandidates.length) {
-      logger.warn('[getRoute] All Google routes are absurdly long. Using fallback.', {
+      logger.warn('[getRoute] All Google routes exceed 5x straight-line. Using shortest anyway.', {
         shortestGoogleMeters: Math.min(...candidates.map((c) => c.distance)),
         straightLineMeters,
       });
-      return fallback('All Google routes absurdly long');
     }
 
     // Pick the shortest-distance route
