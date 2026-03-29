@@ -61,9 +61,8 @@ export class PaymentService {
       };
     }
 
-    if (booking.paymentMethod === PaymentMethod.CASH) {
-      throw new AppError('Cash payment does not require an online order', 400);
-    }
+    // NOTE: CASH bookings CAN create an online order — the driver shows a QR code
+    // and the customer can pay via UPI instead of handing physical cash.
 
     const amount = Number(booking.totalAmount);
     if (!Number.isFinite(amount) || amount <= 0) {

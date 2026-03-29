@@ -1138,7 +1138,9 @@ export class BookingService {
         estimatedDistance: true,
         actualDistance: true,
         createdAt: true,
-      },
+        requireExperienced: true,
+        experiencedDriverFee: true,
+      } as any,
     });
 
     if (!booking) {
@@ -1378,14 +1380,15 @@ export class BookingService {
           startTime,
         });
 
-        let discountAmount = 0;
+        // ── Re-apply ALL discounts at completion (promo + membership + streak) ──
+        let promoDiscountAmount = 0;
         if (updatedStatus.promoCodeId) {
           const promo = await tx.promotion.findUnique({
             where: { id: updatedStatus.promoCodeId },
             select: { type: true, value: true, maxDiscount: true },
           });
           if (promo) {
-            discountAmount = PromotionService.computeDiscount({
+            promoDiscountAmount = PromotionService.computeDiscount({
               type: promo.type,
               value: Number(promo.value),
               maxDiscount: promo.maxDiscount ? Number(promo.maxDiscount) : null,
@@ -1394,10 +1397,34 @@ export class BookingService {
           }
         }
 
-        const payableTotal = Math.max(0, Math.round((fare.total - discountAmount) * 100) / 100);
+        // Retrieve original membership & streak discounts from the booking's pricingBreakdown
+        const originalBreakdown = typeof (booking as any).pricingBreakdown === 'object' && (booking as any).pricingBreakdown
+          ? (booking as any).pricingBreakdown
+          : {};
+        const originalDiscounts = originalBreakdown?.discounts || {};
+        const membershipDiscount = Math.max(0, Number(originalDiscounts?.membershipDiscount || 0));
+        const streakDiscount = Math.max(0, Number(originalDiscounts?.streakDiscount || 0));
+
+        // Total discount = promo + membership + streak
+        const discountAmount = promoDiscountAmount + membershipDiscount + streakDiscount;
+
+        // Re-apply experienced driver fee from original booking
+        const experiencedDriverFee = Math.max(0, Number((booking as any).experiencedDriverFee || 0));
+
+        const payableTotal = Math.max(0, Math.round((fare.total - discountAmount + experiencedDriverFee) * 100) / 100);
         const commissionPct = clamp(Number(process.env.COMMISSION_PERCENTAGE || 0), 0, 100);
         const platformCommission = Math.round((payableTotal * commissionPct) / 100);
         const driverEarnings = Math.max(0, payableTotal - platformCommission);
+
+        // Build the full discount breakdown for receipt display
+        const discountBreakdown = {
+          promoDiscount: promoDiscountAmount,
+          membershipDiscount,
+          streakDiscount,
+          membershipType: originalDiscounts?.membershipType || null,
+          streakRides: originalDiscounts?.streakRides || 0,
+          streakPct: originalDiscounts?.streakPct || 0,
+        };
 
         const updatedFare = await tx.booking.update({
           where: { id: booking.id },
@@ -1408,6 +1435,8 @@ export class BookingService {
               ...(typeof fare.breakdown === 'object' && fare.breakdown ? (fare.breakdown as any) : {}),
               actualDurationMinutes,
               actualDistanceKm: Math.round(actualDistanceKm * 100) / 100,
+              experiencedDriverFee,
+              discounts: discountBreakdown,
             } as any,
             totalAmount: payableTotal,
             discountAmount,
@@ -1431,34 +1460,11 @@ export class BookingService {
         if (updatedStatus.promoCodeId) {
           await tx.promotionRedemption.updateMany({
             where: { bookingId: booking.id, promotionId: updatedStatus.promoCodeId },
-            data: { discountAmount: new Prisma.Decimal(discountAmount) } as any,
+            data: { discountAmount: new Prisma.Decimal(promoDiscountAmount) } as any,
           });
         }
 
-        if (updatedFare.paymentMethod === PaymentMethod.CASH && updatedFare.paymentStatus !== PaymentStatus.PAID) {
-          const payment = await tx.payment.create({
-            data: {
-              bookingId: updatedFare.id,
-              userId: updatedFare.customerId,
-              amount: updatedFare.totalAmount,
-              paymentMethod: PaymentMethod.CASH,
-              status: PaymentStatus.PAID,
-              processedAt: new Date(),
-              gatewayResponse: { purpose: 'BOOKING_CASH' } as any,
-            },
-            select: { id: true },
-          });
-
-          await tx.booking.update({
-            where: { id: updatedFare.id },
-            data: {
-              paymentStatus: PaymentStatus.PAID,
-              paymentId: payment.id,
-            },
-          });
-
-          return { ...updatedFare, paymentStatus: PaymentStatus.PAID } as any;
-        }
+        // CASH trips: do NOT auto-mark as PAID at completion.\n        // Cash payment should be confirmed via \"Collect Cash\" or QR scan.\n        // This was previously auto-marking CASH as PAID which broke the QR flow.
 
         return updatedFare as any;
       });

@@ -118,6 +118,8 @@ export class InvoiceService {
         completedAt: true,
         paymentMethod: true,
         paymentStatus: true,
+        pricingBreakdown: true,
+        experiencedDriverFee: true,
         customer: { select: { firstName: true, lastName: true, phoneNumber: true, email: true } },
         driver: { select: { firstName: true, lastName: true, phoneNumber: true } },
       },
@@ -175,20 +177,86 @@ export class InvoiceService {
 
     const total = Number(booking.totalAmount);
     const discount = Number(booking.discountAmount || 0);
-    const gross = total + discount;
     const commission = Number(booking.platformCommission || 0);
     const earnings = Number(booking.driverEarnings || 0);
 
+    // Read pricingBreakdown for detailed line items
+    const pb = (booking as any).pricingBreakdown || {};
+    const discountsObj = pb?.discounts || {};
+
     doc.moveDown(1);
-    doc.fillColor('#111111').fontSize(12).text('Charges');
-    doc.fontSize(10).fillColor('#444444').text(`Total fare: ${formatMoney(gross)}`);
-    if (discount > 0) doc.text(`Discount: -${formatMoney(discount)}`);
+    doc.fillColor('#111111').fontSize(12).text('Fare Breakdown');
+    doc.fontSize(10).fillColor('#444444');
+
+    // Base / Package fare
+    const packagePrice = Number(pb?.packagePrice || pb?.baseAmount || 0);
+    if (packagePrice > 0) {
+      const pkgHours = Number(pb?.packageHours || 0);
+      const label = pkgHours > 0 ? `Package (${pkgHours}hr)` : 'Base fare';
+      doc.text(`${label}: ${formatMoney(packagePrice)}`);
+    }
+
+    // One-way charge
+    const oneWayCharge = Number(pb?.oneWayCharge || 0);
+    if (oneWayCharge > 0) doc.text(`One-way charge: ${formatMoney(oneWayCharge)}`);
+
+    // Extra km
+    const extraKmCharge = Number(pb?.extraKmCharge || 0);
+    if (extraKmCharge > 0) {
+      const extraKm = Number(pb?.extraKm || 0);
+      doc.text(`Extra km${extraKm > 0 ? ` (${extraKm.toFixed(1)} km)` : ''}: ${formatMoney(extraKmCharge)}`);
+    }
+
+    // Extra time
+    const extraMinuteCharge = Number(pb?.extraMinuteCharge || 0);
+    if (extraMinuteCharge > 0) {
+      const extraMin = Number(pb?.extraMinutes || 0);
+      doc.text(`Extra time${extraMin > 0 ? ` (${extraMin} min)` : ''}: ${formatMoney(extraMinuteCharge)}`);
+    }
+
+    // Night charge
+    const nightCharge = Number(pb?.nightCharge || 0);
+    if (nightCharge > 0) doc.text(`Night charge (10pm-6am): ${formatMoney(nightCharge)}`);
+
+    // Experienced driver fee
+    const experiencedFee = Number(pb?.experiencedDriverFee || (booking as any).experiencedDriverFee || 0);
+    if (experiencedFee > 0) doc.text(`Experienced driver fee: ${formatMoney(experiencedFee)}`);
+
+    // Taxes / convenience
+    const taxesFee = Number(pb?.taxesFee || pb?.convenienceFee || 0);
+    if (taxesFee > 0) doc.text(`Taxes & convenience fee: ${formatMoney(taxesFee)}`);
+
+    // Subtotal
+    const gross = total + discount;
+    doc.text(`Subtotal: ${formatMoney(gross)}`);
+
+    // Discounts
+    const promoDiscount = Number(discountsObj?.promoDiscount || 0);
+    const membershipDiscount = Number(discountsObj?.membershipDiscount || 0);
+    const streakDiscount = Number(discountsObj?.streakDiscount || 0);
+
+    if (promoDiscount > 0) doc.text(`Promo discount: -${formatMoney(promoDiscount)}`);
+    if (membershipDiscount > 0) {
+      const membershipType = discountsObj?.membershipType || 'Membership';
+      doc.text(`${membershipType} discount: -${formatMoney(membershipDiscount)}`);
+    }
+    if (streakDiscount > 0) doc.text(`Streak discount: -${formatMoney(streakDiscount)}`);
+    if (discount > 0 && promoDiscount === 0 && membershipDiscount === 0 && streakDiscount === 0) {
+      // Fallback for old bookings without discount breakdown
+      doc.text(`Discount: -${formatMoney(discount)}`);
+    }
+
     doc.text(`Platform commission: ${formatMoney(commission)}`);
     doc.text(`Driver earnings: ${formatMoney(earnings)}`);
 
     doc.moveDown(2);
     doc.fillColor('#111111').fontSize(12).text('Amount paid');
     doc.fontSize(16).fillColor('#111111').text(formatMoney(total), { align: 'left' });
+
+    if (discount > 0) {
+      doc.moveDown(0.5);
+      doc.fontSize(10).fillColor('#16a34a').text(`You saved ${formatMoney(discount)} on this trip!`);
+    }
 
     doc.moveDown(2);
     doc.fontSize(9).fillColor('#666666').text('This is a system-generated invoice.', { align: 'left' });
