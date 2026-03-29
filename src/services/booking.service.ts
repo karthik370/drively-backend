@@ -1141,7 +1141,7 @@ export class BookingService {
         requireExperienced: true,
         experiencedDriverFee: true,
       } as any,
-    });
+    }) as any;
 
     if (!booking) {
       throw new AppError('Booking not found', 404);
