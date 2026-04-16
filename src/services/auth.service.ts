@@ -429,8 +429,8 @@ export class AuthService {
       throw new AppError('This phone number is not authorized as an admin', 403);
     }
 
-    // 3. Find user (must already exist)
-    const user = await prisma.user.findFirst({
+    // 3. Find user — auto-create if not found (fresh DB support)
+    let user = await prisma.user.findFirst({
       where: {
         OR: [
           { phoneNumber: params.phoneNumber },
@@ -439,7 +439,30 @@ export class AuthService {
       },
     });
     if (!user) {
-      throw new AppError('Admin user account not found. Please sign up first.', 404);
+      const phoneE164 = params.phoneNumber.startsWith('+') ? params.phoneNumber : `+91${callerPhone}`;
+      user = await prisma.user.create({
+        data: {
+          phoneNumber: phoneE164,
+          firstName: 'Admin',
+          lastName: 'User',
+          email: `admin${callerPhone}@drivemate.com`,
+          userType: UserType.CUSTOMER,
+          phoneVerified: true,
+          isVerified: true,
+        },
+      });
+      await prisma.customerProfile.create({ data: { userId: user.id } });
+      const referralCode = await this.generateReferralCode(user.id, UserType.CUSTOMER);
+      await prisma.referralCode.create({
+        data: {
+          code: referralCode,
+          ownerId: user.id,
+          ownerType: UserType.CUSTOMER,
+          rewardAmount: 100,
+          referrerReward: 50,
+          refereeReward: 50,
+        },
+      });
     }
     if (!user.isActive) {
       throw new AppError('Account has been deactivated', 403);
@@ -451,10 +474,21 @@ export class AuthService {
       data: { isVerified: true, phoneVerified: true, lastLoginAt: new Date() },
     });
 
-    const { generateAccessToken, generateRefreshToken } = await import('../utils/jwt');
-    const tokenPayload = { ...user, email: user.email ?? undefined };
-    const accessToken = generateAccessToken(tokenPayload as any);
-    const refreshToken = generateRefreshToken(tokenPayload as any);
+    const accessToken = generateAccessToken({
+      id: user.id,
+      phoneNumber: user.phoneNumber,
+      email: user.email || undefined,
+      userType: user.userType,
+      isVerified: user.isVerified,
+    });
+
+    const refreshToken = generateRefreshToken({
+      id: user.id,
+      phoneNumber: user.phoneNumber,
+      email: user.email || undefined,
+      userType: user.userType,
+      isVerified: user.isVerified,
+    });
 
     await prisma.session.create({
       data: {
