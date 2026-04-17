@@ -153,7 +153,7 @@ export class InvoiceService {
       doc.on('error', (e: unknown) => reject(e));
     });
 
-    doc.fontSize(20).text('DriveMate Invoice', { align: 'left' });
+    doc.fontSize(20).text('Drively Invoice', { align: 'left' });
     doc.moveDown(0.5);
     doc.fontSize(10).fillColor('#444444').text(`Booking: ${booking.bookingNumber}`);
     doc.text(`Created: ${formatDate(booking.createdAt)}`);

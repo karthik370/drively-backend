@@ -170,6 +170,8 @@ export class MatchingService {
     });
 
     // ── Favorite driver priority: notify favorites first ──
+    // Track notified IDs so they don't receive a second push below
+    const alreadyNotifiedIds = new Set<string>();
     try {
       const customerProfile = await prisma.customerProfile.findUnique({
         where: { userId: booking.customerId },
@@ -177,7 +179,6 @@ export class MatchingService {
       });
       const favIds = Array.isArray(customerProfile?.favoriteDriverIds) ? customerProfile.favoriteDriverIds : [];
       if (favIds.length > 0) {
-        // Check which favorites are online and available
         const onlineFavs = await prisma.driverProfile.findMany({
           where: {
             userId: { in: favIds },
@@ -195,6 +196,8 @@ export class MatchingService {
             body: booking.pickupAddress ? `Pickup: ${String(booking.pickupAddress)}` : 'A customer who favorited you needs a ride!',
             data: { kind: 'favorite_booking_offer', bookingId: String(bookingId) },
           });
+          // Mark these drivers as already notified — prevent duplicate push below
+          favDriverIds.forEach((id: string) => alreadyNotifiedIds.add(id));
         }
       }
     } catch {
@@ -210,7 +213,11 @@ export class MatchingService {
         select: { userId: true },
         take: 500,
       });
-      const driverIds = online.map((d: any) => String(d.userId)).filter(Boolean);
+      // Exclude favourite drivers — they already received the priority notification above
+      const driverIds = online
+        .map((d: any) => String(d.userId))
+        .filter(Boolean)
+        .filter((id: string) => !alreadyNotifiedIds.has(id));
       if (driverIds.length) {
         await sendExpoPushNotification({
           userIds: driverIds,
