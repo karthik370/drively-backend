@@ -13,8 +13,28 @@ import { sendExpoPushNotification } from '../services/expoPush.service';
 
 export const registerBookingHandlers = (io: Server, socket: AuthenticatedSocket) => {
   socket.on('booking:join', async (bookingId: string) => {
-    socket.join(`booking:${bookingId}`);
-    logger.info(`User ${socket.userId} joined booking room: ${bookingId}`);
+    // ── Security: verify this user is actually part of this booking ──
+    if (!socket.userId) return;
+
+    try {
+      const booking = await prisma.booking.findUnique({
+        where: { id: bookingId },
+        select: { customerId: true, driverId: true },
+      });
+
+      if (!booking) {
+        logger.warn(`booking:join rejected — booking not found`, { bookingId, userId: socket.userId });
+        return;
+      }
+
+      const isParticipant = booking.customerId === socket.userId || booking.driverId === socket.userId;
+      if (!isParticipant) {
+        logger.warn(`booking:join rejected — user not in booking`, { bookingId, userId: socket.userId });
+        return;
+      }
+
+      socket.join(`booking:${bookingId}`);
+      logger.info(`User ${socket.userId} joined booking room: ${bookingId}`);
 
     try {
       const booking = await prisma.booking.findUnique({
@@ -116,7 +136,10 @@ export const registerBookingHandlers = (io: Server, socket: AuthenticatedSocket)
         });
       }
     } catch (error) {
-      logger.warn('Failed to emit latest location on booking:join', { error, bookingId, userId: socket.userId });
+        logger.warn('Failed to emit latest location on booking:join', { error, bookingId, userId: socket.userId });
+      }
+    } catch (error) {
+      logger.warn('booking:join auth check failed', { error, bookingId, userId: socket.userId });
     }
   });
 
