@@ -122,7 +122,27 @@ export class OtpService {
     });
 
     if (!otpRecord) {
-      throw new AppError('No OTP found for this phone number', 404);
+      // ── Idempotent retry: check if this exact OTP was already verified recently ──
+      // Scenario: user verified → backend marked DB → network dropped → phone retries.
+      // We must return success rather than blocking a legitimate user.
+      const recentlyVerified = await prisma.otpVerification.findFirst({
+        where: {
+          phoneNumber,
+          otp,          // Must match the exact same OTP code
+          isVerified: true,
+          verifiedAt: {
+            gte: new Date(Date.now() - OTP_EXPIRY * 1000), // Within expiry window
+          },
+        },
+        orderBy: { verifiedAt: 'desc' },
+      });
+
+      if (recentlyVerified) {
+        logger.info(`OTP idempotent retry — already verified recently`, { phoneNumber });
+        return true; // Network drop recovery — let the user in
+      }
+
+      throw new AppError('OTP has expired or already been used. Please request a new OTP', 404);
     }
 
     if (otpRecord.attempts >= MAX_ATTEMPTS) {
