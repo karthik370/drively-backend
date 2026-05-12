@@ -131,6 +131,7 @@ export class DriverController {
         userId: true,
         documentsVerified: true,
         backgroundCheckStatus: true,
+        rejectionReason: true,
         user: {
           select: {
             profileImage: true,
@@ -144,7 +145,7 @@ export class DriverController {
         panNumber: true,
         panImageUrl: true,
         updatedAt: true,
-      },
+      } as any,
     });
 
     if (!profile) {
@@ -157,6 +158,7 @@ export class DriverController {
         driverId: profile.userId,
         documentsVerified: profile.documentsVerified,
         backgroundCheckStatus: profile.backgroundCheckStatus,
+        rejectionReason: (profile as any).rejectionReason || null,
         submitted: hasSubmittedDocs(profile),
         updatedAt: profile.updatedAt,
       },
@@ -210,6 +212,7 @@ export class DriverController {
       panImageUrl,
       documentsVerified: false,
       backgroundCheckStatus: VerificationStatus.PENDING,
+      rejectionReason: null, // Clear old rejection reason on resubmission
     };
 
     if (licenseExpiryDate) {

@@ -368,6 +368,7 @@ model DriverProfile {
   workingHours              Json?
   documentsVerified         Boolean               @default(false)
   backgroundCheckStatus     VerificationStatus    @default(PENDING)
+  rejectionReason           String?               @db.Text
   isExperienced             Boolean               @default(false)
   currentVehicleId          String?               @unique
   currentVehicle            Vehicle?              @relation("CurrentDriver", fields: [currentVehicleId], references: [id])

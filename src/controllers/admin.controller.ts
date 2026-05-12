@@ -132,12 +132,14 @@ export class AdminController {
         documentsVerified: approved,
         backgroundCheckStatus: approved ? VerificationStatus.VERIFIED : VerificationStatus.REJECTED,
         isExperienced: approved ? isExperienced : false,
+        rejectionReason: approved ? null : (reason || null),
       } as any,
       select: {
         userId: true,
         documentsVerified: true,
         backgroundCheckStatus: true,
         isExperienced: true,
+        rejectionReason: true,
         updatedAt: true,
       } as any,
     });
