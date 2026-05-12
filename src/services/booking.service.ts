@@ -464,6 +464,12 @@ export class BookingService {
     let durationSeconds = 0;
     let polyline: string | null = null;
 
+    // Start promo user lookup in parallel with route calculation (saves ~200-400ms)
+    const promoCode = (params.promoCode || '').trim();
+    const promoUserPromise = promoCode
+      ? prisma.user.findUnique({ where: { id: params.customerId }, select: { userType: true } })
+      : Promise.resolve(null);
+
     if (!isSingleLocationRoundTrip && dropLat !== undefined && dropLng !== undefined) {
       try {
         const route = await getRoute(
@@ -494,9 +500,8 @@ export class BookingService {
     });
 
     let promo: { promotionId: string; discountAmount: number; finalAmount: number } | null = null;
-    const promoCode = (params.promoCode || '').trim();
     if (promoCode) {
-      const user = await prisma.user.findUnique({ where: { id: params.customerId }, select: { userType: true } });
+      const user = await promoUserPromise;
       if (!user) {
         throw new AppError('User not found', 404);
       }
@@ -745,47 +750,28 @@ export class BookingService {
       throw new AppError('Booking already accepted by another driver', 409);
     }
 
-    await prisma.driverProfile.update({
-      where: { userId: params.driverId },
-      data: {
-        isAvailable: false,
-      } as any,
-    });
-
-    const io = getSocketServer();
-    io.to(`booking:${params.bookingId}`).emit('booking:accepted', {
-      bookingId: params.bookingId,
-      driverId: params.driverId,
-    });
-    io.to(`user:${booking.customerId}`).emit('booking:accepted', {
-      bookingId: params.bookingId,
-      driverId: params.driverId,
-      otp,
-    });
-    io.to(`user:${params.driverId}`).emit('booking:accepted', {
-      bookingId: params.bookingId,
-    });
-
-    io.to('online-drivers').emit('booking:offer-removed', {
-      bookingId: params.bookingId,
-      reason: 'ACCEPTED',
-    });
-
-    try {
-      const otpText = typeof otp === 'string' && otp.trim() ? ` OTP: ${otp.trim()}` : '';
-      await sendExpoPushNotification({
-        userIds: [String(booking.customerId)],
-        title: 'Driver accepted',
-        body: `A driver has accepted your booking.${otpText}`,
-        data: {
-          kind: 'booking_accepted',
-          bookingId: String(params.bookingId),
-          otp: typeof otp === 'string' ? otp : '',
+    // Fetch driver user info + update availability in parallel
+    const [driverUser] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: params.driverId },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          phoneNumber: true,
+          profileImage: true,
+          rating: true,
+          totalRatings: true,
+          userType: true,
         },
-      });
-    } catch {
-    }
+      }),
+      prisma.driverProfile.update({
+        where: { userId: params.driverId },
+        data: { isAvailable: false } as any,
+      }),
+    ]);
 
+    // Single re-read with driver+customer included — used for socket AND return
     const acceptedBooking = await prisma.booking.findUnique({
       where: { id: params.bookingId },
       select: {
@@ -818,7 +804,58 @@ export class BookingService {
         driverEarnings: true,
         commissionPercentage: true,
         otp: true,
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phoneNumber: true,
+            profileImage: true,
+            rating: true,
+            totalRatings: true,
+          },
+        },
       },
+    });
+
+    const io = getSocketServer();
+
+    // Emit to customer with FULL driver + booking data (eliminates REST re-fetch)
+    io.to(`user:${booking.customerId}`).emit('booking:accepted', {
+      bookingId: params.bookingId,
+      driverId: params.driverId,
+      otp,
+      driver: driverUser,
+      booking: acceptedBooking,
+    });
+    // Emit to driver (lightweight)
+    io.to(`user:${params.driverId}`).emit('booking:accepted', {
+      bookingId: params.bookingId,
+      booking: acceptedBooking,
+    });
+    // Emit to booking room (lightweight)
+    io.to(`booking:${params.bookingId}`).emit('booking:accepted', {
+      bookingId: params.bookingId,
+      driverId: params.driverId,
+    });
+    io.to('online-drivers').emit('booking:offer-removed', {
+      bookingId: params.bookingId,
+      reason: 'ACCEPTED',
+    });
+
+    // Push notification — fire-and-forget (don't block response)
+    setImmediate(() => {
+      const otpText = typeof otp === 'string' && otp.trim() ? ` OTP: ${otp.trim()}` : '';
+      sendExpoPushNotification({
+        userIds: [String(booking.customerId)],
+        title: 'Driver accepted',
+        body: `A driver has accepted your booking.${otpText}`,
+        data: {
+          kind: 'booking_accepted',
+          bookingId: String(params.bookingId),
+          otp: typeof otp === 'string' ? otp : '',
+        },
+      }).catch(() => {});
     });
 
     return { booking: acceptedBooking };
