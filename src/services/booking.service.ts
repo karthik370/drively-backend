@@ -1232,10 +1232,23 @@ export class BookingService {
       });
     }
 
+    // ── Push notifications with retry ──
+    const sendPushWithRetry = async (payload: Parameters<typeof sendExpoPushNotification>[0], retries = 2) => {
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          await sendExpoPushNotification(payload);
+          return; // success
+        } catch (err) {
+          logger.warn(`Push notification attempt ${attempt + 1} failed`, { error: err, bookingId: params.bookingId });
+          if (attempt < retries) await new Promise(r => setTimeout(r, 1000)); // wait 1s before retry
+        }
+      }
+    };
+
     try {
       const next = params.status;
       if (next === BookingStatus.DRIVER_ARRIVING) {
-        await sendExpoPushNotification({
+        await sendPushWithRetry({
           userIds: [String(booking.customerId)],
           title: 'Driver is on the way',
           body: 'Your driver is heading to your pickup location.',
@@ -1246,7 +1259,7 @@ export class BookingService {
       if (next === BookingStatus.ARRIVED) {
         const otpText =
           typeof booking.otp === 'string' && booking.otp.trim() ? ` OTP: ${booking.otp.trim()}` : '';
-        await sendExpoPushNotification({
+        await sendPushWithRetry({
           userIds: [String(booking.customerId)],
           title: 'Driver arrived',
           body: `Your driver has reached the pickup point. Please share OTP to start the trip.${otpText}`,
@@ -1258,7 +1271,8 @@ export class BookingService {
           },
         });
       }
-    } catch {
+    } catch (notifErr) {
+      logger.warn('Failed to send status push notification after retries', { error: notifErr, bookingId: params.bookingId, status: params.status });
     }
 
     let completedBooking:
@@ -1593,17 +1607,21 @@ export class BookingService {
       }
     }
 
-
+    // ── Socket events ──
     const io = getSocketServer();
-    io.to(`booking:${params.bookingId}`).emit('booking:status', {
-      bookingId: params.bookingId,
-      status: params.status,
-    });
 
-    io.to(`user:${booking.customerId}`).emit('booking:status', {
+    // Build status payload — include OTP for ARRIVED so customer gets it via socket too
+    const statusPayload: any = {
       bookingId: params.bookingId,
       status: params.status,
-    });
+    };
+    if (params.status === BookingStatus.ARRIVED && typeof booking.otp === 'string' && booking.otp.trim()) {
+      statusPayload.otp = booking.otp.trim();
+    }
+
+    io.to(`booking:${params.bookingId}`).emit('booking:status', statusPayload);
+
+    io.to(`user:${booking.customerId}`).emit('booking:status', statusPayload);
     if (booking.driverId) {
       io.to(`user:${booking.driverId}`).emit('booking:status', {
         bookingId: params.bookingId,
