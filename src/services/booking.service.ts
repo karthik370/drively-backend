@@ -882,7 +882,6 @@ export class BookingService {
     ];
 
     const nowMs = Date.now();
-    const nowDate = new Date(nowMs);
     const booking = await prisma.booking.findFirst({
       where: {
         AND: [
