@@ -133,6 +133,7 @@ export class ReferralService {
     // 3.  PROCESS FIRST-TRIP REWARD
     //     Called from booking completion. If the user was referred and this is
     //     their first completed trip → credit both wallets.
+    //     ⚠️ Anti-fraud guards prevent gaming via fake trips.
     // ────────────────────────────────────────────────────────────────────────
     static async processFirstTripReward(userId: string, bookingId: string): Promise<void> {
         // Find pending (COMPLETED but not yet REWARDED) referral for this user
@@ -156,6 +157,100 @@ export class ReferralService {
             // Not their first trip — they may have been rewarded already or applied code late
             return;
         }
+
+        // ── ANTI-FRAUD GUARDS ────────────────────────────────────────────────
+
+        // Fetch the booking to validate it's a real trip
+        const booking = await prisma.booking.findUnique({
+            where: { id: bookingId },
+            select: {
+                customerId: true,
+                driverId: true,
+                startedAt: true,
+                completedAt: true,
+                actualDistance: true,
+                estimatedDistance: true,
+                totalAmount: true,
+            },
+        });
+
+        if (!booking) {
+            logger.warn('Referral reward skipped: booking not found', { bookingId, userId });
+            return;
+        }
+
+        // Guard 1: Minimum trip duration ≥ 45 minutes
+        const MIN_TRIP_DURATION_MS = 45 * 60 * 1000; // 45 minutes
+        if (booking.startedAt && booking.completedAt) {
+            const durationMs = new Date(booking.completedAt).getTime() - new Date(booking.startedAt).getTime();
+            if (durationMs < MIN_TRIP_DURATION_MS) {
+                logger.warn('Referral reward BLOCKED: trip too short', {
+                    bookingId, userId, durationMs, requiredMs: MIN_TRIP_DURATION_MS,
+                });
+                return;
+            }
+        } else {
+            logger.warn('Referral reward BLOCKED: missing start/complete timestamps', { bookingId, userId });
+            return;
+        }
+
+        // Guard 2: Minimum trip distance ≥ 0.5 km
+        const MIN_TRIP_DISTANCE_KM = 5;
+        const actualDist = booking.actualDistance ? Number(booking.actualDistance) : 0;
+        const estimatedDist = booking.estimatedDistance ? Number(booking.estimatedDistance) : 0;
+        const tripDistanceKm = actualDist > 0 ? actualDist : estimatedDist;
+        if (tripDistanceKm < MIN_TRIP_DISTANCE_KM) {
+            logger.warn('Referral reward BLOCKED: distance too short', {
+                bookingId, userId, tripDistanceKm, requiredKm: MIN_TRIP_DISTANCE_KM,
+            });
+            return;
+        }
+
+        // Guard 3: Minimum fare ≥ ₹300 (cheapest 1hr package = ₹309 + ₹50 taxes)
+        const MIN_FARE_AMOUNT = 300;
+        const fareAmount = Number(booking.totalAmount || 0);
+        if (fareAmount < MIN_FARE_AMOUNT) {
+            logger.warn('Referral reward BLOCKED: fare too low', {
+                bookingId, userId, fareAmount, requiredFare: MIN_FARE_AMOUNT,
+            });
+            return;
+        }
+
+        // Guard 4: Self-referral block — referrer cannot be the driver of this trip
+        if (booking.driverId && booking.driverId === referral.referrerUserId) {
+            logger.warn('Referral reward BLOCKED: self-referral detected (referrer is the driver)', {
+                bookingId, userId, referrerId: referral.referrerUserId, driverId: booking.driverId,
+            });
+            return;
+        }
+        // Also block if the referred user is the driver of their own first trip
+        if (booking.customerId && booking.customerId === referral.referrerUserId) {
+            logger.warn('Referral reward BLOCKED: referrer is the customer (reverse self-referral)', {
+                bookingId, userId, referrerId: referral.referrerUserId, customerId: booking.customerId,
+            });
+            return;
+        }
+
+        // Guard 5: Daily reward cap — max 3 referral rewards per referrer per day
+        const MAX_DAILY_REFERRAL_REWARDS = 3;
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const todayRewards = await prisma.referral.count({
+            where: {
+                referrerUserId: referral.referrerUserId,
+                status: 'REWARDED',
+                completedAt: { gte: todayStart },
+            },
+        });
+        if (todayRewards >= MAX_DAILY_REFERRAL_REWARDS) {
+            logger.warn('Referral reward BLOCKED: daily cap reached', {
+                bookingId, userId, referrerId: referral.referrerUserId,
+                todayRewards, maxDaily: MAX_DAILY_REFERRAL_REWARDS,
+            });
+            return;
+        }
+
+        // ── ALL GUARDS PASSED — proceed with reward ──────────────────────────
 
         const referrerReward = Number(referral.rewardAmount);
         const referredReward = Number(referral.referredReward);

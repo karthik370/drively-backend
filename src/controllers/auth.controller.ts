@@ -9,6 +9,7 @@ import prisma from '../config/database';
 import axios from 'axios';
 import { logger } from '../utils/logger';
 import jwt from 'jsonwebtoken';
+import { ReferralService } from '../services/referral.service';
 
 const normalizePhoneE164 = (raw: string): string => {
   const trimmed = String(raw || '').trim();
@@ -183,6 +184,7 @@ const signupSchema = Joi.object({
   gender: Joi.string().valid('MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY').optional(),
   msg91AccessToken: Joi.string().min(10).optional(),
   otpSignupToken: Joi.string().min(10).optional(),
+  referralCode: Joi.string().trim().max(20).optional().allow('', null),
 });
 
 const loginSchema = Joi.object({
@@ -360,8 +362,12 @@ export class AuthController {
       delete value.email;
     }
 
+    // Extract referral code before cleanup
+    const referralCode = typeof (value as any).referralCode === 'string' ? (value as any).referralCode.trim() : '';
+
     delete (value as any).msg91AccessToken;
     delete (value as any).otpSignupToken;
+    delete (value as any).referralCode;
 
     const payload = {
       ...(value as any),
@@ -370,6 +376,19 @@ export class AuthController {
     };
 
     const result = await AuthService.signup(payload);
+
+    // Apply referral code after user is created (fire-and-forget, don't block signup)
+    if (referralCode && result?.user?.id) {
+      try {
+        await ReferralService.applyReferralCode(referralCode, result.user.id);
+        logger.info('Referral code applied during signup', { userId: result.user.id, referralCode });
+      } catch (e: any) {
+        // Don't fail signup if referral code is invalid
+        logger.warn('Failed to apply referral code during signup', {
+          userId: result.user.id, referralCode, error: e?.message,
+        });
+      }
+    }
 
     res.status(201).json({
       success: true,

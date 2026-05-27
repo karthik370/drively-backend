@@ -890,12 +890,7 @@ export class BookingService {
           {
             OR: [
               { status: { in: engagedStatuses } },
-              {
-                AND: [
-                  { status: { in: pendingStatuses } },
-                  { OR: [{ scheduledTime: null }, { scheduledTime: { lte: nowDate } }] },
-                ],
-              },
+              { status: { in: pendingStatuses } },
             ],
           },
         ],

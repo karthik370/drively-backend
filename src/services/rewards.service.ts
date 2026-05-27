@@ -3,9 +3,9 @@ import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 
-const COINS_PER_RIDE = 10;           // Earn 10 coins per completed ride
-const COINS_PER_100_SPENT = 5;       // Earn 5 coins per ₹100 spent
-const COINS_TO_RUPEE_RATIO = 10;     // 10 coins = ₹1 discount
+const COINS_PER_RIDE = 5;            // Earn 5 coins per completed ride
+const COINS_PER_100_SPENT = 2;       // Earn 2 coins per ₹100 spent
+const COINS_TO_RUPEE_RATIO = 20;     // 20 coins = ₹1 discount
 
 export class RewardsService {
     /**
