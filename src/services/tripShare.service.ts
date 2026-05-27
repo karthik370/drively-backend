@@ -13,14 +13,14 @@ export class TripShareService {
         if (booking.customerId !== userId && booking.driverId !== userId) throw new AppError('Unauthorized', 403);
 
         if (booking.shareToken) {
-            const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://app.drivemateservice.com';
+            const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v2.kurnm.click';
             return { shareToken: booking.shareToken, shareUrl: `${baseUrl}/track/${booking.shareToken}` };
         }
 
         const shareToken = crypto.randomBytes(16).toString('hex');
         await prisma.booking.update({ where: { id: bookingId }, data: { shareToken } as any });
 
-        const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://app.drivemateservice.com';
+        const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v2.kurnm.click';
         return { shareToken, shareUrl: `${baseUrl}/track/${shareToken}` };
     }
 

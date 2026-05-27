@@ -42,6 +42,7 @@ import driverWalletRoutes from './routes/driverWallet.routes';
 import subscriptionRoutes from './routes/subscription.routes';
 import tripPhotoRoutes from './routes/tripPhoto.routes';
 import badgeRoutes from './routes/badge.routes';
+import tripShareWebRoutes from './routes/tripShareWeb';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
@@ -158,6 +159,9 @@ app.use('/api/', (req, res, next) => {
 
   return limiter(req, res, next);
 });
+
+// Trip share tracking web page (must be before API routes)
+app.use(tripShareWebRoutes);
 
 app.get('/', (_req, res) => {
   res.status(200).json({
