@@ -42,6 +42,7 @@ import driverWalletRoutes from './routes/driverWallet.routes';
 import subscriptionRoutes from './routes/subscription.routes';
 import tripPhotoRoutes from './routes/tripPhoto.routes';
 import badgeRoutes from './routes/badge.routes';
+import emergencyRoutes from './routes/emergency.routes';
 import tripShareWebRoutes from './routes/tripShareWeb';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
@@ -204,6 +205,7 @@ app.use(`/api/${API_VERSION}/driver-wallet`, driverWalletRoutes);
 app.use(`/api/${API_VERSION}/driver/subscription`, subscriptionRoutes);
 app.use(`/api/${API_VERSION}/trip-photos`, tripPhotoRoutes);
 app.use(`/api/${API_VERSION}/badges`, badgeRoutes);
+app.use(`/api/${API_VERSION}/emergency`, emergencyRoutes);
 
 swaggerDocs(app, Number(PORT));
 
