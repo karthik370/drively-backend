@@ -481,14 +481,20 @@ export const verifyDrivingLicenseStandalone = async (
       data: JSON.stringify(data),
     });
 
-    const vehicleClass = data?.vehicle_class || data?.vehicleClass || [];
+    const vehicleClass = data?.vehicle_class || data?.vehicleClass
+      || data?.details_of_driving_licence?.cov_details || [];
+
+    // Extract details — Cashfree nests them inside details_of_driving_licence
+    const details = data?.details_of_driving_licence || {};
+    const validity = data?.dl_validity?.non_transport || {};
 
     return {
-      valid: Boolean(data?.valid),
-      name: String(data?.name || ''),
+      // Cashfree returns status: "VALID" not valid: true
+      valid: data?.status === 'VALID' || Boolean(data?.valid),
+      name: String(details?.name || data?.name || ''),
       dob: String(data?.dob || dob),
-      issueDate: String(data?.issue_date || data?.doi || ''),
-      expiryDate: String(data?.expiry_date || data?.doe || ''),
+      issueDate: String(details?.date_of_issue || data?.issue_date || data?.doi || ''),
+      expiryDate: String(validity?.to || data?.expiry_date || data?.doe || ''),
       vehicleClass: Array.isArray(vehicleClass) ? vehicleClass.map(String) : [String(vehicleClass)],
       rawResponse: data,
     };
