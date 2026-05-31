@@ -73,9 +73,9 @@ const generateCfSignature = (): string | null => {
       {
         key: publicKey,
         padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: 'sha256',
+        oaepHash: 'sha1', // Cashfree Secure ID uses SHA1 for OAEP
       },
-      Buffer.from(dataToEncrypt)
+      Buffer.from(dataToEncrypt, 'utf8')
     );
 
     return encrypted.toString('base64');
