@@ -455,20 +455,32 @@ export const verifyDrivingLicenseStandalone = async (
   const url = `${baseUrl}/driving-licence`;
   const verificationId = generateVerificationId('dl');
 
-  logger.info('[CashfreeVerification] Verifying DL', { dl: dlNumber.slice(0, 4) + '****', url });
+  const requestBody = {
+    verification_id: verificationId,
+    dl_number: dlNumber.toUpperCase(),
+    dob,
+  };
+
+  logger.info('[CashfreeVerification] Verifying DL', {
+    dl: dlNumber.slice(0, 4) + '****',
+    dob,
+    url,
+    body: requestBody,
+  });
 
   try {
-    const response = await axios.post(
-      url,
-      {
-        verification_id: verificationId,
-        dl_number: dlNumber.toUpperCase(),
-        dob,
-      },
-      { headers: getHeaders(), timeout: 30000 }
-    );
+    const response = await axios.post(url, requestBody, {
+      headers: getHeaders(),
+      timeout: 30000,
+    });
 
     const data = response.data;
+
+    logger.info('[CashfreeVerification] DL response', {
+      status: response.status,
+      data: JSON.stringify(data),
+    });
+
     const vehicleClass = data?.vehicle_class || data?.vehicleClass || [];
 
     return {
@@ -481,14 +493,20 @@ export const verifyDrivingLicenseStandalone = async (
       rawResponse: data,
     };
   } catch (error: any) {
+    const errData = error?.response?.data;
+    const errStatus = error?.response?.status;
     logger.error('[CashfreeVerification] DL verification failed', {
-      status: error?.response?.status,
-      data: error?.response?.data,
+      status: errStatus,
+      data: JSON.stringify(errData),
       message: error?.message,
+      url,
+      requestBody,
     });
+    // Surface the actual Cashfree error message
+    const cfMessage = errData?.message || errData?.error || error?.message || 'Driving Licence verification failed';
     throw new AppError(
-      error?.response?.data?.message || 'Driving Licence verification failed',
-      error?.response?.status || 502
+      `DL verification error: ${cfMessage}`,
+      errStatus || 502
     );
   }
 };
