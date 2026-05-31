@@ -257,7 +257,7 @@ export const createDigiLockerUrl = async (
 };
 
 // ── DigiLocker: Get Verification Status ────────────────────────────────────
-// ENDPOINT: GET /verification/digilocker/{verification_id}
+// ENDPOINT: GET /verification/digilocker?verification_id=xxx  (query param, NOT path!)
 export type DigiLockerDocument = {
   documentType: string;
   status: string;
@@ -275,7 +275,8 @@ export const getDigiLockerStatus = async (
   verificationId: string
 ): Promise<DigiLockerStatusResult> => {
   const { baseUrl } = getVerificationConfig();
-  const url = `${baseUrl}/digilocker/${verificationId}`;
+  // ✅ Correct: query parameter, NOT path parameter
+  const url = `${baseUrl}/digilocker?verification_id=${encodeURIComponent(verificationId)}`;
 
   logger.info('[CashfreeVerification] Checking DigiLocker status', { verificationId, url });
 
@@ -334,14 +335,16 @@ export const getDigiLockerStatus = async (
 };
 
 // ── DigiLocker: Get Document ───────────────────────────────────────────────
+// ENDPOINT: GET /verification/digilocker/document?verification_id=xxx&document_type=xxx
 export const getDigiLockerDocument = async (
   verificationId: string,
   docType: string
 ): Promise<Record<string, any>> => {
   const { baseUrl } = getVerificationConfig();
-  const url = `${baseUrl}/digilocker/${verificationId}/document/${docType}`;
+  // ✅ Correct: query parameters
+  const url = `${baseUrl}/digilocker/document?verification_id=${encodeURIComponent(verificationId)}&document_type=${encodeURIComponent(docType)}`;
 
-  logger.info('[CashfreeVerification] Fetching DigiLocker document', { verificationId, docType });
+  logger.info('[CashfreeVerification] Fetching DigiLocker document', { verificationId, docType, url });
 
   try {
     const response = await axios.get(url, {
