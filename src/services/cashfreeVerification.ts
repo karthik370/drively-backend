@@ -458,6 +458,7 @@ export const verifyDrivingLicenseStandalone = async (
   const requestBody = {
     verification_id: verificationId,
     dl_number: dlNumber.toUpperCase(),
+    license_number: dlNumber.toUpperCase(),
     dob,
   };
 
@@ -533,16 +534,17 @@ export const faceMatch = async (
 ): Promise<FaceMatchResult> => {
   const { baseUrl } = getVerificationConfig();
   const url = `${baseUrl}/face-match`;
-  const verificationId = generateVerificationId('face');
+  const faceMatchId = generateVerificationId('face');
 
   const threshold = parseFloat(process.env.CASHFREE_FACE_MATCH_THRESHOLD || '0.65');
 
-  logger.info('[CashfreeVerification] Running face match', { url });
+  logger.info('[CashfreeVerification] Running face match', { url, faceMatchId });
 
   try {
     // Cashfree Face Match requires multipart/form-data with image files
     const form = new FormData();
-    form.append('verification_id', verificationId);
+    // ✅ Correct field name: face_match_id (NOT verification_id)
+    form.append('face_match_id', faceMatchId);
 
     // Convert base64 to Buffer for file upload
     const selfieBuffer = Buffer.from(selfieBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
@@ -560,17 +562,25 @@ export const faceMatch = async (
     });
 
     const data = response.data;
-    const score = Number(data?.match_score ?? data?.score ?? data?.confidence ?? 0);
+
+    logger.info('[CashfreeVerification] Face match response', {
+      status: response.status,
+      data: JSON.stringify(data),
+    });
+
+    // Cashfree returns face_match_score (0-1) and face_match_result ("YES"/"NO")
+    const score = Number(data?.face_match_score ?? data?.match_score ?? data?.score ?? 0);
+    const resultYes = data?.face_match_result === 'YES';
 
     return {
       matchScore: score,
-      isMatch: score >= threshold,
+      isMatch: resultYes || score >= threshold,
       rawResponse: data,
     };
   } catch (error: any) {
     logger.error('[CashfreeVerification] Face match failed', {
       status: error?.response?.status,
-      data: error?.response?.data,
+      data: JSON.stringify(error?.response?.data),
       message: error?.message,
     });
     throw new AppError(
@@ -595,7 +605,7 @@ export const faceLivenessCheck = async (imageBase64: string): Promise<FaceLivene
   const url = `${baseUrl}/face-liveness`;
   const verificationId = generateVerificationId('live');
 
-  logger.info('[CashfreeVerification] Running face liveness check', { url });
+  logger.info('[CashfreeVerification] Running face liveness check', { url, verificationId });
 
   try {
     // Cashfree Face Liveness requires multipart/form-data
@@ -609,21 +619,31 @@ export const faceLivenessCheck = async (imageBase64: string): Promise<FaceLivene
       headers: {
         ...getAuthHeaders(),
         ...form.getHeaders(),
+        'x-api-version': '2024-12-01', // Required by Cashfree face-liveness
       },
       timeout: 60000,
     });
 
     const data = response.data;
 
+    logger.info('[CashfreeVerification] Face liveness response', {
+      status: response.status,
+      data: JSON.stringify(data),
+    });
+
+    // Cashfree returns liveness: "YES"/"NO" and liveness_score (0-1)
+    const isLive = data?.liveness === 'YES' || data?.is_live === true;
+    const score = Number(data?.liveness_score ?? data?.confidence ?? data?.score ?? 0);
+
     return {
-      isLive: Boolean(data?.is_live ?? data?.liveness ?? false),
-      confidence: Number(data?.confidence ?? data?.score ?? 0),
+      isLive,
+      confidence: score,
       rawResponse: data,
     };
   } catch (error: any) {
     logger.error('[CashfreeVerification] Face liveness check failed', {
       status: error?.response?.status,
-      data: error?.response?.data,
+      data: JSON.stringify(error?.response?.data),
       message: error?.message,
     });
     // Liveness failure should not block — treat as a soft failure
