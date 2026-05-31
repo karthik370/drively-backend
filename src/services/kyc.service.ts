@@ -22,7 +22,7 @@ import {
 } from './cashfreeVerification';
 
 // ── Initiate KYC ───────────────────────────────────────────────────────────
-export const initiateKyc = async (userId: string, phoneNumber: string) => {
+export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
   // Check if user already has completed KYC
   const existing = await prisma.kycVerification.findUnique({ where: { userId } });
   if (existing?.status === KycStatus.COMPLETED) {
