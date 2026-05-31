@@ -451,8 +451,8 @@ export const verifyDrivingLicenseStandalone = async (
   dob: string // YYYY-MM-DD
 ): Promise<DlVerificationResult> => {
   const { baseUrl } = getVerificationConfig();
-  // ✅ Correct path: /driving-licence (British spelling with 'c')
-  const url = `${baseUrl}/driving-licence`;
+  // ✅ Correct path: /driving-license (American spelling with 's'!)
+  const url = `${baseUrl}/driving-license`;
   const verificationId = generateVerificationId('dl');
 
   const requestBody = {
