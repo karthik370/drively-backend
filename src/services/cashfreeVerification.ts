@@ -48,22 +48,73 @@ const getVerificationConfig = () => {
   return { clientId, clientSecret, env, baseUrl };
 };
 
+/**
+ * Generate x-cf-signature for Cashfree Verification 2FA
+ * Format: RSA-encrypt( clientId.unixTimestamp ) using Public Key, then Base64 encode
+ * Valid for 10 min (sandbox) / 5 min (production)
+ */
+const generateCfSignature = (): string | null => {
+  const { clientId } = getVerificationConfig();
+
+  // Public key for Secure ID (Verification) — separate from Payouts public key
+  const publicKeyRaw = process.env.CASHFREE_VERIFICATION_PUBLIC_KEY;
+  if (!publicKeyRaw) {
+    logger.warn('[CashfreeVerification] CASHFREE_VERIFICATION_PUBLIC_KEY not set — skipping x-cf-signature');
+    return null;
+  }
+
+  try {
+    // Handle escaped newlines from env vars
+    const publicKey = publicKeyRaw.replace(/\\n/g, '\n');
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const dataToEncrypt = `${clientId}.${timestamp}`;
+
+    const encrypted = crypto.publicEncrypt(
+      {
+        key: publicKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256',
+      },
+      Buffer.from(dataToEncrypt)
+    );
+
+    return encrypted.toString('base64');
+  } catch (error: any) {
+    logger.error('[CashfreeVerification] Failed to generate x-cf-signature', { error: error.message });
+    return null;
+  }
+};
+
 const getHeaders = () => {
   const { clientId, clientSecret } = getVerificationConfig();
-  return {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'x-client-id': clientId,
     'x-client-secret': clientSecret,
   };
+
+  const signature = generateCfSignature();
+  if (signature) {
+    headers['x-cf-signature'] = signature;
+  }
+
+  return headers;
 };
 
 /** Auth headers without Content-Type (for multipart/form-data — axios sets it) */
 const getAuthHeaders = () => {
   const { clientId, clientSecret } = getVerificationConfig();
-  return {
+  const headers: Record<string, string> = {
     'x-client-id': clientId,
     'x-client-secret': clientSecret,
   };
+
+  const signature = generateCfSignature();
+  if (signature) {
+    headers['x-cf-signature'] = signature;
+  }
+
+  return headers;
 };
 
 // ── Generate unique verification ID ────────────────────────────────────────
