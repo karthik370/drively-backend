@@ -32,11 +32,13 @@ export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
   // Generate verification ID for Cashfree
   const verificationId = generateVerificationId(userId);
 
-  // Build redirect URL — the mobile app will handle the return
-  const redirectUrl = process.env.KYC_REDIRECT_URL || 'drively://kyc/callback';
+  // Build redirect URL — Cashfree requires https:// URLs
+  // If no valid https redirect URL is configured, omit it (app polls for status instead)
+  const configuredRedirectUrl = process.env.KYC_REDIRECT_URL || '';
+  const redirectUrl = configuredRedirectUrl.startsWith('https://') ? configuredRedirectUrl : undefined;
 
   // Create DigiLocker URL via Cashfree
-  // Note: The Cashfree DigiLocker create-url API does NOT accept identity_type/identity_value.
+  // Note: The Cashfree DigiLocker API does NOT accept identity_type/identity_value.
   // It only needs verification_id and document_requested. The user logs in via DigiLocker portal.
   const digilockerResult = await createDigiLockerUrl({
     verificationId,
