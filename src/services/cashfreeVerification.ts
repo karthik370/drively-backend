@@ -287,9 +287,17 @@ export const getDigiLockerStatus = async (
     });
 
     const data = response.data;
+
+    // Log the FULL raw response so we can debug
+    logger.info('[CashfreeVerification] DigiLocker status raw response', {
+      verificationId,
+      responseStatus: response.status,
+      rawData: JSON.stringify(data),
+    });
+
     const documents: DigiLockerDocument[] = [];
 
-    // Parse documents from response
+    // Parse documents from response (if they're included)
     if (data?.documents && Array.isArray(data.documents)) {
       for (const doc of data.documents) {
         documents.push({
@@ -314,9 +322,19 @@ export const getDigiLockerStatus = async (
       documents.push({ documentType: 'DRIVING_LICENSE', status: 'SUCCESS', data: data.driving_licence });
     }
 
+    // Normalize status - Cashfree may return various values
+    const rawStatus = String(data?.status || 'PENDING').toUpperCase();
+
+    logger.info('[CashfreeVerification] DigiLocker parsed result', {
+      verificationId,
+      status: rawStatus,
+      documentsCount: documents.length,
+      documentTypes: documents.map(d => d.documentType),
+    });
+
     return {
       verificationId: String(data?.verification_id || verificationId),
-      status: String(data?.status || 'PENDING').toUpperCase(),
+      status: rawStatus,
       documents,
       rawResponse: data,
     };

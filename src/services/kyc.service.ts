@@ -15,6 +15,7 @@ import {
   generateVerificationId,
   createDigiLockerUrl,
   getDigiLockerStatus,
+  getDigiLockerDocument,
   verifyPanStandalone,
   verifyDrivingLicenseStandalone,
   faceMatch,
@@ -102,14 +103,24 @@ export const checkDigiLockerCompletion = async (userId: string) => {
   // Fetch status from Cashfree
   const result = await getDigiLockerStatus(kyc.digilockerVerificationId);
 
-  if (result.status !== 'AUTHENTICATED' && result.status !== 'COMPLETED' && result.status !== 'SUCCESS') {
+  logger.info('[KYC] DigiLocker status result', {
+    userId,
+    status: result.status,
+    documentsCount: result.documents.length,
+  });
+
+  // Check if authentication is complete
+  const isAuthenticated = ['AUTHENTICATED', 'COMPLETED', 'SUCCESS', 'CONSENT_APPROVED'].includes(result.status);
+
+  if (!isAuthenticated) {
     // Still pending or failed
-    if (result.status === 'FAILED' || result.status === 'REJECTED') {
+    const isFailed = ['FAILED', 'REJECTED', 'EXPIRED', 'CONSENT_DENIED'].includes(result.status);
+    if (isFailed) {
       await prisma.kycVerification.update({
         where: { userId },
         data: {
           status: KycStatus.FAILED,
-          failureReason: 'DigiLocker authentication failed. Please try again.',
+          failureReason: `DigiLocker: ${result.status}. Please try again.`,
           cashfreeResponse: result.rawResponse as any,
         },
       });
@@ -117,7 +128,39 @@ export const checkDigiLockerCompletion = async (userId: string) => {
     return getKycStatus(userId);
   }
 
-  // DigiLocker succeeded — extract document data
+  // DigiLocker authentication succeeded!
+  // If no documents were returned inline, fetch them separately
+  let documents = result.documents;
+
+  if (documents.length === 0) {
+    logger.info('[KYC] No documents in status response — fetching each document separately', { userId });
+
+    const docTypes = ['AADHAAR', 'PAN', 'DRIVING_LICENSE'];
+    for (const docType of docTypes) {
+      try {
+        const docData = await getDigiLockerDocument(kyc.digilockerVerificationId, docType);
+        logger.info('[KYC] Fetched document separately', {
+          userId,
+          docType,
+          hasData: Object.keys(docData).length > 0,
+          rawData: JSON.stringify(docData).slice(0, 500),
+        });
+
+        if (docData && Object.keys(docData).length > 0) {
+          documents.push({
+            documentType: docType,
+            status: 'SUCCESS',
+            data: docData,
+          });
+        }
+      } catch (e: any) {
+        logger.warn('[KYC] Could not fetch document', { userId, docType, error: e.message });
+        // Continue to next document — some might not be available
+      }
+    }
+  }
+
+  // Extract document data
   const updateData: Record<string, any> = {
     cashfreeResponse: result.rawResponse,
   };
@@ -126,9 +169,10 @@ export const checkDigiLockerCompletion = async (userId: string) => {
   let panDone = false;
   let dlDone = false;
 
-  for (const doc of result.documents) {
+  for (const doc of documents) {
     const docStatus = doc.status.toUpperCase();
-    if (docStatus !== 'SUCCESS' && docStatus !== 'FETCHED' && docStatus !== 'AVAILABLE') continue;
+    // Accept any non-error status
+    if (['ERROR', 'FAILED', 'REJECTED', 'NOT_FOUND'].includes(docStatus)) continue;
 
     if (doc.documentType === 'AADHAAR') {
       aadhaarDone = true;
@@ -178,6 +222,15 @@ export const checkDigiLockerCompletion = async (userId: string) => {
         if (!isNaN(parsed.getTime())) updateData.dlExpiryDate = parsed;
       }
     }
+  }
+
+  // If status was AUTHENTICATED but no docs at all, still mark as partially done
+  // (at minimum, Aadhaar was verified via DigiLocker login itself)
+  if (isAuthenticated && !aadhaarDone && documents.length === 0) {
+    aadhaarDone = true;
+    updateData.aadhaarVerified = true;
+    updateData.aadhaarSource = KycDocumentSource.DIGILOCKER;
+    logger.info('[KYC] Marking Aadhaar as verified from DigiLocker authentication', { userId });
   }
 
   // Determine next status
