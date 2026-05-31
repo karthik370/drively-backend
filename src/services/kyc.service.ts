@@ -263,7 +263,7 @@ export const checkDigiLockerCompletion = async (userId: string) => {
 // ── Fallback: Verify Missing Documents via Standalone APIs ─────────────────
 export const verifyMissingDocumentsFallback = async (
   userId: string,
-  input: { panNumber?: string; dlNumber?: string }
+  input: { panNumber?: string; dlNumber?: string; dob?: string }
 ) => {
   const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
   if (!kyc) {
@@ -290,21 +290,34 @@ export const verifyMissingDocumentsFallback = async (
         updateData.panName = panResult.registeredName;
         updateData.panSource = KycDocumentSource.STANDALONE_API;
       } else {
-        errors.push(`PAN "${input.panNumber}" is invalid.`);
+        errors.push(`PAN "${input.panNumber}" could not be verified. Please check the number and try again.`);
       }
     } catch (e: any) {
+      logger.error('[KYC] PAN verification API error', { error: e.message, panNumber: input.panNumber?.slice(0, 4) + '***' });
       errors.push(`PAN verification failed: ${e.message}`);
     }
   }
 
   // Verify DL if not already done
   if (!kyc.dlVerified && input.dlNumber) {
-    // Use DOB from Aadhaar (which should be verified by now)
-    const dob = kyc.aadhaarDob;
-    if (!dob) {
-      errors.push('Cannot verify DL without verified date of birth from Aadhaar.');
+    // Use DOB from Aadhaar first, then from user input
+    let dobStr: string | null = null;
+
+    if (kyc.aadhaarDob) {
+      dobStr = kyc.aadhaarDob.toISOString().split('T')[0]; // YYYY-MM-DD
+    } else if (input.dob) {
+      // User provided DOB manually
+      dobStr = input.dob; // Expected format: YYYY-MM-DD
+      // Also save DOB to aadhaarDob for future use
+      const parsed = new Date(input.dob);
+      if (!isNaN(parsed.getTime())) {
+        updateData.aadhaarDob = parsed;
+      }
+    }
+
+    if (!dobStr) {
+      errors.push('Date of birth is required to verify your Driving License. Please provide your DOB.');
     } else {
-      const dobStr = dob.toISOString().split('T')[0]; // YYYY-MM-DD
       try {
         const dlResult = await verifyDrivingLicenseStandalone(input.dlNumber, dobStr);
         if (dlResult.valid) {
@@ -325,9 +338,10 @@ export const verifyMissingDocumentsFallback = async (
             if (!isNaN(parsed.getTime())) updateData.dlDob = parsed;
           }
         } else {
-          errors.push(`Driving License "${input.dlNumber}" is invalid or does not match your DOB.`);
+          errors.push(`Driving License "${input.dlNumber}" is invalid or does not match your date of birth.`);
         }
       } catch (e: any) {
+        logger.error('[KYC] DL verification API error', { error: e.message, dlNumber: input.dlNumber?.slice(0, 4) + '***' });
         errors.push(`DL verification failed: ${e.message}`);
       }
     }

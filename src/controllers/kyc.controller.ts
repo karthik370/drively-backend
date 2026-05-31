@@ -84,6 +84,7 @@ export class KycController {
 
     const panNumber = typeof req.body?.panNumber === 'string' ? req.body.panNumber.trim() : undefined;
     const dlNumber = typeof req.body?.dlNumber === 'string' ? req.body.dlNumber.trim() : undefined;
+    const dob = typeof req.body?.dob === 'string' ? req.body.dob.trim() : undefined;
 
     if (!panNumber && !dlNumber) {
       throw new AppError('At least one of panNumber or dlNumber is required', 400);
@@ -99,7 +100,12 @@ export class KycController {
       throw new AppError('Invalid Driving License number', 400);
     }
 
-    const status = await verifyMissingDocumentsFallback(req.user.id, { panNumber, dlNumber });
+    // Validate DOB format if provided (YYYY-MM-DD)
+    if (dob && !/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+      throw new AppError('Invalid DOB format. Expected: YYYY-MM-DD', 400);
+    }
+
+    const status = await verifyMissingDocumentsFallback(req.user.id, { panNumber, dlNumber, dob });
 
     res.status(200).json({
       success: true,
