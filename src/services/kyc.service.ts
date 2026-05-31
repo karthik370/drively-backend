@@ -36,12 +36,13 @@ export const initiateKyc = async (userId: string, phoneNumber: string) => {
   const redirectUrl = process.env.KYC_REDIRECT_URL || 'drively://kyc/callback';
 
   // Create DigiLocker URL via Cashfree
+  // Note: The Cashfree DigiLocker create-url API does NOT accept identity_type/identity_value.
+  // It only needs verification_id and document_requested. The user logs in via DigiLocker portal.
   const digilockerResult = await createDigiLockerUrl({
     verificationId,
-    identityType: 'MOBILE',
-    identityValue: phoneNumber.replace(/^\+91/, '').replace(/^\+/, ''),
     documentRequested: ['AADHAAR', 'PAN', 'DRIVING_LICENSE'],
     redirectUrl,
+    userFlow: 'signup', // Allow both new and existing DigiLocker users
   });
 
   // Upsert KYC record

@@ -2,18 +2,28 @@
  * Cashfree Verification Suite — Secure ID APIs
  * ──────────────────────────────────────────────
  * Uses the Cashfree Verification REST API for:
- *   - DigiLocker (Aadhaar + PAN + Driving License in one flow)
+ *   - DigiLocker (Aadhaar + PAN + Driving Licence in one flow)
  *   - Standalone PAN verification
- *   - Standalone Driving License verification
- *   - Face Match (selfie vs Aadhaar photo)
- *   - Face Liveness check
+ *   - Standalone Driving Licence verification
+ *   - Face Match (selfie vs Aadhaar photo)  — multipart/form-data
+ *   - Face Liveness check                   — multipart/form-data
  *
  * Base URLs:
  *   Sandbox:    https://sandbox.cashfree.com/verification
  *   Production: https://api.cashfree.com/verification
+ *
+ * Correct endpoint paths (verified against Cashfree docs):
+ *   DigiLocker Create URL:  POST /digilocker         (NOT /digilocker/create-url)
+ *   DigiLocker Status:      GET  /digilocker/{id}
+ *   DigiLocker Verify Acct: POST /digilocker/verify-account
+ *   PAN:                    POST /pan
+ *   Driving Licence:        POST /driving-licence     (British spelling with 'c')
+ *   Face Match:             POST /face-match          (multipart/form-data)
+ *   Face Liveness:          POST /face-liveness       (multipart/form-data)
  */
 import axios from 'axios';
 import crypto from 'crypto';
+import FormData from 'form-data';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 
@@ -47,7 +57,17 @@ const getHeaders = () => {
   };
 };
 
+/** Auth headers without Content-Type (for multipart/form-data — axios sets it) */
+const getAuthHeaders = () => {
+  const { clientId, clientSecret } = getVerificationConfig();
+  return {
+    'x-client-id': clientId,
+    'x-client-secret': clientSecret,
+  };
+};
+
 // ── Generate unique verification ID ────────────────────────────────────────
+// Max 50 chars, alphanumeric + . - _ only (Cashfree requirement)
 export const generateVerificationId = (userId: string): string => {
   const ts = Date.now().toString(36);
   const rand = crypto.randomBytes(4).toString('hex');
@@ -84,7 +104,9 @@ export const verifyDigiLockerAccount = async (
     };
   } catch (error: any) {
     logger.error('[CashfreeVerification] DigiLocker verify-account failed', {
-      error: error?.response?.data || error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
     });
     throw new AppError(
       error?.response?.data?.message || 'Failed to verify DigiLocker account',
@@ -94,12 +116,13 @@ export const verifyDigiLockerAccount = async (
 };
 
 // ── DigiLocker: Create URL ─────────────────────────────────────────────────
+// ENDPOINT: POST /verification/digilocker  (NOT /digilocker/create-url!)
+// Request body: { verification_id, document_requested, redirect_url?, user_flow? }
 export type DigiLockerCreateUrlParams = {
   verificationId: string;
-  identityType: 'AADHAAR' | 'MOBILE';
-  identityValue: string;
   documentRequested: ('AADHAAR' | 'PAN' | 'DRIVING_LICENSE')[];
-  redirectUrl: string;
+  redirectUrl?: string;
+  userFlow?: 'signin' | 'signup';
 };
 
 export type DigiLockerCreateUrlResult = {
@@ -113,27 +136,44 @@ export const createDigiLockerUrl = async (
   params: DigiLockerCreateUrlParams
 ): Promise<DigiLockerCreateUrlResult> => {
   const { baseUrl } = getVerificationConfig();
-  const url = `${baseUrl}/digilocker/create-url`;
+  // ✅ Correct path: POST /verification/digilocker
+  const url = `${baseUrl}/digilocker`;
 
   logger.info('[CashfreeVerification] Creating DigiLocker URL', {
     verificationId: params.verificationId,
     documents: params.documentRequested,
+    url,
   });
 
   try {
-    const response = await axios.post(
-      url,
-      {
-        verification_id: params.verificationId,
-        identity_type: params.identityType,
-        identity_value: params.identityValue,
-        document_requested: params.documentRequested,
-        redirect_url: params.redirectUrl,
-      },
-      { headers: getHeaders(), timeout: 30000 }
-    );
+    // Build request body per Cashfree API docs:
+    // Required: verification_id, document_requested
+    // Optional: redirect_url, user_flow
+    const requestBody: Record<string, any> = {
+      verification_id: params.verificationId,
+      document_requested: params.documentRequested,
+    };
+
+    if (params.redirectUrl) {
+      requestBody.redirect_url = params.redirectUrl;
+    }
+    if (params.userFlow) {
+      requestBody.user_flow = params.userFlow;
+    }
+
+    logger.info('[CashfreeVerification] DigiLocker request body', { body: requestBody });
+
+    const response = await axios.post(url, requestBody, {
+      headers: getHeaders(),
+      timeout: 30000,
+    });
 
     const data = response.data;
+
+    logger.info('[CashfreeVerification] DigiLocker response', {
+      status: response.status,
+      data,
+    });
 
     const digilockerUrl = data?.url || data?.digilocker_url || '';
     if (!digilockerUrl) {
@@ -153,7 +193,10 @@ export const createDigiLockerUrl = async (
   } catch (error: any) {
     if (error instanceof AppError) throw error;
     logger.error('[CashfreeVerification] DigiLocker create-url failed', {
-      error: error?.response?.data || error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
+      url,
     });
     throw new AppError(
       error?.response?.data?.message || 'Failed to create DigiLocker verification URL',
@@ -163,6 +206,7 @@ export const createDigiLockerUrl = async (
 };
 
 // ── DigiLocker: Get Verification Status ────────────────────────────────────
+// ENDPOINT: GET /verification/digilocker/{verification_id}
 export type DigiLockerDocument = {
   documentType: string;
   status: string;
@@ -171,7 +215,7 @@ export type DigiLockerDocument = {
 
 export type DigiLockerStatusResult = {
   verificationId: string;
-  status: string; // PENDING | AUTHENTICATED | FAILED
+  status: string; // PENDING | AUTHENTICATED | EXPIRED | CONSENT_DENIED | FAILED
   documents: DigiLockerDocument[];
   rawResponse: any;
 };
@@ -182,7 +226,7 @@ export const getDigiLockerStatus = async (
   const { baseUrl } = getVerificationConfig();
   const url = `${baseUrl}/digilocker/${verificationId}`;
 
-  logger.info('[CashfreeVerification] Checking DigiLocker status', { verificationId });
+  logger.info('[CashfreeVerification] Checking DigiLocker status', { verificationId, url });
 
   try {
     const response = await axios.get(url, {
@@ -214,6 +258,9 @@ export const getDigiLockerStatus = async (
     if (data?.driving_license && !documents.find(d => d.documentType === 'DRIVING_LICENSE')) {
       documents.push({ documentType: 'DRIVING_LICENSE', status: 'SUCCESS', data: data.driving_license });
     }
+    if (data?.driving_licence && !documents.find(d => d.documentType === 'DRIVING_LICENSE')) {
+      documents.push({ documentType: 'DRIVING_LICENSE', status: 'SUCCESS', data: data.driving_licence });
+    }
 
     return {
       verificationId: String(data?.verification_id || verificationId),
@@ -224,7 +271,9 @@ export const getDigiLockerStatus = async (
   } catch (error: any) {
     logger.error('[CashfreeVerification] DigiLocker get-status failed', {
       verificationId,
-      error: error?.response?.data || error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
     });
     throw new AppError(
       error?.response?.data?.message || 'Failed to get DigiLocker status',
@@ -254,7 +303,9 @@ export const getDigiLockerDocument = async (
     logger.error('[CashfreeVerification] DigiLocker get-document failed', {
       verificationId,
       docType,
-      error: error?.response?.data || error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
     });
     throw new AppError(
       error?.response?.data?.message || `Failed to fetch ${docType} from DigiLocker`,
@@ -264,6 +315,8 @@ export const getDigiLockerDocument = async (
 };
 
 // ── Standalone PAN Verification ────────────────────────────────────────────
+// ENDPOINT: POST /verification/pan
+// Body: { verification_id, pan }
 export type PanVerificationResult = {
   valid: boolean;
   registeredName: string;
@@ -274,13 +327,17 @@ export type PanVerificationResult = {
 export const verifyPanStandalone = async (panNumber: string): Promise<PanVerificationResult> => {
   const { baseUrl } = getVerificationConfig();
   const url = `${baseUrl}/pan`;
+  const verificationId = generateVerificationId('pan');
 
-  logger.info('[CashfreeVerification] Verifying PAN', { pan: panNumber.slice(0, 4) + '******' });
+  logger.info('[CashfreeVerification] Verifying PAN', { pan: panNumber.slice(0, 4) + '******', url });
 
   try {
     const response = await axios.post(
       url,
-      { pan: panNumber.toUpperCase() },
+      {
+        verification_id: verificationId,
+        pan: panNumber.toUpperCase(),
+      },
       { headers: getHeaders(), timeout: 30000 }
     );
 
@@ -293,7 +350,9 @@ export const verifyPanStandalone = async (panNumber: string): Promise<PanVerific
     };
   } catch (error: any) {
     logger.error('[CashfreeVerification] PAN verification failed', {
-      error: error?.response?.data || error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
     });
     throw new AppError(
       error?.response?.data?.message || 'PAN verification failed',
@@ -302,7 +361,9 @@ export const verifyPanStandalone = async (panNumber: string): Promise<PanVerific
   }
 };
 
-// ── Standalone Driving License Verification ────────────────────────────────
+// ── Standalone Driving Licence Verification ────────────────────────────────
+// ENDPOINT: POST /verification/driving-licence  (British spelling with 'c'!)
+// Body: { verification_id, dl_number, dob }
 export type DlVerificationResult = {
   valid: boolean;
   name: string;
@@ -318,14 +379,20 @@ export const verifyDrivingLicenseStandalone = async (
   dob: string // YYYY-MM-DD
 ): Promise<DlVerificationResult> => {
   const { baseUrl } = getVerificationConfig();
-  const url = `${baseUrl}/driving-license`;
+  // ✅ Correct path: /driving-licence (British spelling with 'c')
+  const url = `${baseUrl}/driving-licence`;
+  const verificationId = generateVerificationId('dl');
 
-  logger.info('[CashfreeVerification] Verifying DL', { dl: dlNumber.slice(0, 4) + '****' });
+  logger.info('[CashfreeVerification] Verifying DL', { dl: dlNumber.slice(0, 4) + '****', url });
 
   try {
     const response = await axios.post(
       url,
-      { dl_number: dlNumber.toUpperCase(), dob },
+      {
+        verification_id: verificationId,
+        dl_number: dlNumber.toUpperCase(),
+        dob,
+      },
       { headers: getHeaders(), timeout: 30000 }
     );
 
@@ -343,16 +410,21 @@ export const verifyDrivingLicenseStandalone = async (
     };
   } catch (error: any) {
     logger.error('[CashfreeVerification] DL verification failed', {
-      error: error?.response?.data || error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
     });
     throw new AppError(
-      error?.response?.data?.message || 'Driving License verification failed',
+      error?.response?.data?.message || 'Driving Licence verification failed',
       error?.response?.status || 502
     );
   }
 };
 
 // ── Face Match ─────────────────────────────────────────────────────────────
+// ENDPOINT: POST /verification/face-match
+// Content-Type: multipart/form-data
+// Fields: verification_id, image1 (file), image2 (file)
 export type FaceMatchResult = {
   matchScore: number;
   isMatch: boolean;
@@ -365,20 +437,31 @@ export const faceMatch = async (
 ): Promise<FaceMatchResult> => {
   const { baseUrl } = getVerificationConfig();
   const url = `${baseUrl}/face-match`;
+  const verificationId = generateVerificationId('face');
 
   const threshold = parseFloat(process.env.CASHFREE_FACE_MATCH_THRESHOLD || '0.65');
 
-  logger.info('[CashfreeVerification] Running face match');
+  logger.info('[CashfreeVerification] Running face match', { url });
 
   try {
-    const response = await axios.post(
-      url,
-      {
-        first_image: selfieBase64,
-        second_image: documentImageBase64,
+    // Cashfree Face Match requires multipart/form-data with image files
+    const form = new FormData();
+    form.append('verification_id', verificationId);
+
+    // Convert base64 to Buffer for file upload
+    const selfieBuffer = Buffer.from(selfieBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+    const docBuffer = Buffer.from(documentImageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+
+    form.append('image1', selfieBuffer, { filename: 'selfie.jpg', contentType: 'image/jpeg' });
+    form.append('image2', docBuffer, { filename: 'document.jpg', contentType: 'image/jpeg' });
+
+    const response = await axios.post(url, form, {
+      headers: {
+        ...getAuthHeaders(),
+        ...form.getHeaders(),
       },
-      { headers: getHeaders(), timeout: 60000 }
-    );
+      timeout: 60000,
+    });
 
     const data = response.data;
     const score = Number(data?.match_score ?? data?.score ?? data?.confidence ?? 0);
@@ -390,7 +473,9 @@ export const faceMatch = async (
     };
   } catch (error: any) {
     logger.error('[CashfreeVerification] Face match failed', {
-      error: error?.response?.data || error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
     });
     throw new AppError(
       error?.response?.data?.message || 'Face match failed',
@@ -400,6 +485,9 @@ export const faceMatch = async (
 };
 
 // ── Face Liveness ──────────────────────────────────────────────────────────
+// ENDPOINT: POST /verification/face-liveness
+// Content-Type: multipart/form-data
+// Fields: verification_id, image (file)
 export type FaceLivenessResult = {
   isLive: boolean;
   confidence: number;
@@ -409,15 +497,25 @@ export type FaceLivenessResult = {
 export const faceLivenessCheck = async (imageBase64: string): Promise<FaceLivenessResult> => {
   const { baseUrl } = getVerificationConfig();
   const url = `${baseUrl}/face-liveness`;
+  const verificationId = generateVerificationId('live');
 
-  logger.info('[CashfreeVerification] Running face liveness check');
+  logger.info('[CashfreeVerification] Running face liveness check', { url });
 
   try {
-    const response = await axios.post(
-      url,
-      { image: imageBase64 },
-      { headers: getHeaders(), timeout: 60000 }
-    );
+    // Cashfree Face Liveness requires multipart/form-data
+    const form = new FormData();
+    form.append('verification_id', verificationId);
+
+    const imageBuffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+    form.append('image', imageBuffer, { filename: 'selfie.jpg', contentType: 'image/jpeg' });
+
+    const response = await axios.post(url, form, {
+      headers: {
+        ...getAuthHeaders(),
+        ...form.getHeaders(),
+      },
+      timeout: 60000,
+    });
 
     const data = response.data;
 
@@ -428,7 +526,9 @@ export const faceLivenessCheck = async (imageBase64: string): Promise<FaceLivene
     };
   } catch (error: any) {
     logger.error('[CashfreeVerification] Face liveness check failed', {
-      error: error?.response?.data || error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
     });
     // Liveness failure should not block — treat as a soft failure
     return {
