@@ -237,6 +237,22 @@ enum EmergencyStatus {
   FALSE_ALARM
 }
 
+enum KycStatus {
+  NOT_STARTED
+  DIGILOCKER_PENDING
+  DIGILOCKER_COMPLETED
+  FALLBACK_PENDING
+  FACE_MATCH_PENDING
+  COMPLETED
+  FAILED
+}
+
+enum KycDocumentSource {
+  DIGILOCKER
+  STANDALONE_API
+  MANUAL_UPLOAD
+}
+
 model User {
   id                    String             @id @default(uuid())
   phoneNumber           String             @unique @db.VarChar(15)
@@ -292,6 +308,9 @@ model User {
   incentiveProgress      DriverIncentiveProgress[]
   driverPayouts          DriverPayout[]
   rewardsCoins           RewardsCoin[]
+
+  // KYC Verification
+  kycVerification        KycVerification?
 
   @@index([phoneNumber])
   @@index([email])
@@ -1183,4 +1202,57 @@ model DriverBadge {
   @@index([driverId])
   @@index([badgeId])
   @@map("driver_badges")
+}
+
+// ─── KYC Verification (Cashfree Secure ID) ──────────────────────────────────
+model KycVerification {
+  id                        String            @id @default(uuid())
+  userId                    String            @unique
+  user                      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status                    KycStatus         @default(NOT_STARTED)
+
+  // DigiLocker session
+  digilockerVerificationId  String?           @unique
+  digilockerUrl             String?           @db.Text
+  digilockerUrlExpiresAt    DateTime?
+
+  // Aadhaar (always from DigiLocker)
+  aadhaarVerified           Boolean           @default(false)
+  aadhaarName               String?           @db.VarChar(255)
+  aadhaarDob                DateTime?
+  aadhaarGender             String?           @db.VarChar(20)
+  aadhaarAddress            String?           @db.Text
+  aadhaarSource             KycDocumentSource?
+
+  // PAN
+  panVerified               Boolean           @default(false)
+  panNumber                 String?           @db.VarChar(20)
+  panName                   String?           @db.VarChar(255)
+  panSource                 KycDocumentSource?
+
+  // Driving License
+  dlVerified                Boolean           @default(false)
+  dlNumber                  String?           @db.VarChar(50)
+  dlName                    String?           @db.VarChar(255)
+  dlDob                     DateTime?
+  dlExpiryDate              DateTime?
+  dlVehicleClass            String?           @db.VarChar(100)
+  dlSource                  KycDocumentSource?
+
+  // Selfie + Face Match
+  selfieUrl                 String?           @db.Text
+  faceMatchScore            Float?
+  faceMatchPassed           Boolean           @default(false)
+
+  // Metadata
+  cashfreeResponse          Json?
+  failureReason             String?           @db.Text
+  completedAt               DateTime?
+  createdAt                 DateTime          @default(now())
+  updatedAt                 DateTime          @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([digilockerVerificationId])
+  @@map("kyc_verifications")
 }
