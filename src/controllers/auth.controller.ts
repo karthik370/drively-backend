@@ -73,7 +73,7 @@ const extractIdentifierFromMsg91 = (payload: any): string => {
 const MSG91_MAX_RETRIES = 3;
 const MSG91_RETRY_DELAYS = [0, 500, 1000]; // ms delay before each attempt
 
-const verifyMsg91AccessTokenAndExtract = async (accessToken: string): Promise<{ identifierRaw: string }> => {
+const verifyMsg91AccessTokenAndExtract = async (accessToken: string, claimedPhone?: string): Promise<{ identifierRaw: string }> => {
   const authkey = String(process.env.MSG91_AUTHKEY || process.env.MSG91_AUTH_KEY || '').trim();
   if (!authkey) {
     logger.error('MSG91 AuthKey is not configured. Set MSG91_AUTHKEY in .env');
@@ -123,6 +123,21 @@ const verifyMsg91AccessTokenAndExtract = async (accessToken: string): Promise<{ 
       payload: lastError?.response?.data,
     });
     throw new AppError('Failed to verify OTP token', 502);
+  }
+
+  // Handle "access-token already verified" (code 702)
+  // MSG91 returns this when the same token is verified again — it's still valid,
+  // but the response doesn't include the phone number. Fall back to the client-provided phone.
+  const responseCode = verifyResponse?.code;
+  const responseMessage = String(verifyResponse?.message || '').toLowerCase();
+  if (responseCode === 702 || responseMessage.includes('already verified')) {
+    if (claimedPhone) {
+      logger.info('MSG91 token already verified, using client-provided phone', { claimedPhone });
+      return { identifierRaw: claimedPhone };
+    }
+    // No fallback phone — still treat as failure
+    logger.warn('MSG91 token already verified but no client phone to fall back to', { verifyResponse });
+    throw new AppError('OTP token already used. Please request a new OTP.', 401);
   }
 
   const identifierRaw = extractIdentifierFromMsg91(verifyResponse);
@@ -211,7 +226,7 @@ export class AuthController {
     const accessToken = String(value.accessToken).trim();
     const claimedPhone = typeof value.phoneNumber === 'string' ? value.phoneNumber.trim() : '';
 
-    const { identifierRaw } = await verifyMsg91AccessTokenAndExtract(accessToken);
+    const { identifierRaw } = await verifyMsg91AccessTokenAndExtract(accessToken, claimedPhone);
 
     const isEmail = identifierRaw.includes('@');
 
@@ -340,7 +355,7 @@ export class AuthController {
       const decoded = verifyOtpSignupToken(otpSignupToken);
       identifierRaw = decoded.identifierRaw;
     } else {
-      const r = await verifyMsg91AccessTokenAndExtract(msg91AccessToken);
+      const r = await verifyMsg91AccessTokenAndExtract(msg91AccessToken, value.phoneNumber);
       identifierRaw = r.identifierRaw;
     }
 
