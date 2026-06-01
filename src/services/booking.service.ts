@@ -843,20 +843,20 @@ export class BookingService {
       reason: 'ACCEPTED',
     });
 
-    // Push notification — fire-and-forget (don't block response)
-    setImmediate(() => {
-      const otpText = typeof otp === 'string' && otp.trim() ? ` OTP: ${otp.trim()}` : '';
-      sendExpoPushNotification({
+    // Push notification — send immediately so customer gets notified fast
+    try {
+      const otpText = typeof otp === 'string' && otp.trim() ? `\n🔒 Your trip OTP: ${otp.trim()}` : '';
+      await sendExpoPushNotification({
         userIds: [String(booking.customerId)],
-        title: 'Driver accepted',
-        body: `A driver has accepted your booking.${otpText}`,
+        title: '🚗 Driver accepted your ride!',
+        body: `${driverUser?.firstName || 'Your driver'} is heading to your pickup location.${otpText}`,
         data: {
           kind: 'booking_accepted',
           bookingId: String(params.bookingId),
           otp: typeof otp === 'string' ? otp : '',
         },
-      }).catch(() => {});
-    });
+      });
+    } catch {}
 
     return { booking: acceptedBooking };
   };
@@ -1244,24 +1244,24 @@ export class BookingService {
       if (next === BookingStatus.DRIVER_ARRIVING) {
         await sendPushWithRetry({
           userIds: [String(booking.customerId)],
-          title: 'Driver is on the way',
-          body: 'Your driver is heading to your pickup location.',
+          title: '🚗 Driver is on the way!',
+          body: 'Your driver is heading to your pickup location. Get ready!',
           data: { kind: 'booking_status', bookingId: String(params.bookingId), status: 'DRIVER_ARRIVING' },
         });
       }
 
       if (next === BookingStatus.ARRIVED) {
-        const otpText =
-          typeof booking.otp === 'string' && booking.otp.trim() ? ` OTP: ${booking.otp.trim()}` : '';
+        const otpCode = typeof booking.otp === 'string' && booking.otp.trim() ? booking.otp.trim() : '';
+        const otpLine = otpCode ? `\n🔒 Your trip OTP: ${otpCode}` : '';
         await sendPushWithRetry({
           userIds: [String(booking.customerId)],
-          title: 'Driver arrived',
-          body: `Your driver has reached the pickup point. Please share OTP to start the trip.${otpText}`,
+          title: '📍 Driver has arrived!',
+          body: `Your driver is at the pickup point.${otpLine}\nShare the OTP with your driver to start the trip.`,
           data: {
             kind: 'booking_status',
             bookingId: String(params.bookingId),
             status: 'ARRIVED',
-            otp: typeof booking.otp === 'string' ? booking.otp : '',
+            otp: otpCode,
           },
         });
       }

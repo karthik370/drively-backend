@@ -7,6 +7,19 @@ import { sendExpoPushNotification } from './expoPush.service';
 
 let lastKickoffRecentBookingsTs = 0;
 
+// ── Dedup guard: prevent duplicate push notifications for the same booking ──
+// When a driver goes online, kickoffMatchingForRecentPendingBookings can race
+// with createBooking's setImmediate call, both triggering startMatchingForBooking
+// before the DB matchAttempts counter is incremented. This Set prevents the second
+// call from sending a duplicate push.
+const recentlyBroadcastBookings = new Set<string>();
+const BROADCAST_DEDUP_TTL_MS = 60_000; // 60 seconds
+
+const markAsBroadcast = (bookingId: string) => {
+  recentlyBroadcastBookings.add(bookingId);
+  setTimeout(() => recentlyBroadcastBookings.delete(bookingId), BROADCAST_DEDUP_TTL_MS);
+};
+
 type BookingMatchingState = {
   driverId: string | null;
   status: BookingStatus;
@@ -100,6 +113,14 @@ export class MatchingService {
     if (alreadyBroadcast) {
       return;
     }
+
+    // In-memory dedup: if another call already broadcast this booking (race condition),
+    // skip entirely — socket event + push already sent.
+    if (recentlyBroadcastBookings.has(bookingId)) {
+      logger.info('Skipping duplicate broadcast for booking', { bookingId });
+      return;
+    }
+    markAsBroadcast(bookingId);
 
     await prisma.booking.update({
       where: { id: bookingId },
