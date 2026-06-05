@@ -71,57 +71,128 @@ export type DigiLockerSessionResult = {
 /**
  * Step 1: Create a DigiLocker session.
  * Returns a session_id and authorization_url to redirect the user to.
+ *
+ * Note: Tries multiple possible endpoint paths since Surepass docs are
+ * behind authentication and the exact path is not publicly documented.
  */
 export const digilockerCreateSession = async (
   redirectUrl: string
 ): Promise<DigiLockerSessionResult> => {
   const { baseUrl } = getSurepassConfig();
-  const url = `${baseUrl}/api/v1/digilocker/generate-url`;
 
-  logger.info('[Surepass] Creating DigiLocker session', { redirectUrl, url });
+  // Possible endpoint paths (try in order)
+  const possiblePaths = [
+    '/api/v1/digilocker/generate-url',
+    '/api/v1/digilocker-sdk/generate-url',
+    '/api/v1/digilocker/initiate',
+    '/api/v1/digilocker-sdk/sessions/create',
+    '/api/v1/digilocker/url',
+    '/api/v1/digilocker/create-session',
+    '/api/v1/digilocker/session',
+  ];
 
-  try {
-    const response = await axios.post(
-      url,
-      {
-        redirect_url: redirectUrl,
-      },
-      { headers: getHeaders(), timeout: 30000 }
-    );
+  const requestBody = {
+    redirect_url: redirectUrl,
+  };
 
-    const data = response.data;
+  logger.info('[Surepass] Creating DigiLocker session', { redirectUrl, paths: possiblePaths.length });
 
-    logger.info('[Surepass] DigiLocker session response', {
-      statusCode: data?.status_code,
-      success: data?.success,
-      hasUrl: Boolean(data?.data?.authorization_url || data?.data?.url),
-      hasSessionId: Boolean(data?.data?.session_id || data?.data?.client_id),
-    });
+  let lastError: any = null;
 
-    const sessionId = data?.data?.session_id || data?.data?.client_id || data?.data?.id;
-    const authorizationUrl = data?.data?.authorization_url || data?.data?.url || data?.data?.redirect_url;
+  for (const path of possiblePaths) {
+    const url = `${baseUrl}${path}`;
+    try {
+      logger.info('[Surepass] Trying DigiLocker endpoint', { url });
 
-    if (!sessionId || !authorizationUrl) {
-      throw new AppError(
-        data?.message || 'Failed to create DigiLocker session — missing session ID or URL',
-        502
+      const response = await axios.post(
+        url,
+        requestBody,
+        { headers: getHeaders(), timeout: 15000 }
       );
-    }
 
-    return {
-      sessionId: String(sessionId),
-      authorizationUrl: String(authorizationUrl),
-    };
-  } catch (error: any) {
-    if (error instanceof AppError) throw error;
-    logger.error('[Surepass] DigiLocker create session failed', {
-      status: error?.response?.status,
-      data: error?.response?.data,
-      message: error?.message,
-    });
-    const msg = error?.response?.data?.message || error?.message || 'Failed to create DigiLocker session';
-    throw new AppError(msg, error?.response?.status || 502);
+      const data = response.data;
+
+      logger.info('[Surepass] DigiLocker session response', {
+        url,
+        statusCode: data?.status_code,
+        success: data?.success,
+        dataKeys: data?.data ? Object.keys(data.data) : [],
+        rawData: JSON.stringify(data).slice(0, 500),
+      });
+
+      const sessionId = data?.data?.session_id || data?.data?.client_id || data?.data?.id;
+      const authorizationUrl = data?.data?.authorization_url || data?.data?.url || data?.data?.redirect_url;
+
+      if (!sessionId || !authorizationUrl) {
+        // API responded but didn't have expected fields — log and try parsing differently
+        logger.warn('[Surepass] DigiLocker response missing expected fields', {
+          url,
+          hasSessionId: Boolean(sessionId),
+          hasAuthUrl: Boolean(authorizationUrl),
+          data: JSON.stringify(data).slice(0, 1000),
+        });
+
+        // If we got a response but no expected fields, it might still be the right endpoint
+        // with a different response structure — throw with the data for debugging
+        if (data?.success || data?.status_code === 200) {
+          throw new AppError(
+            `DigiLocker endpoint ${path} responded but returned unexpected structure. Raw: ${JSON.stringify(data).slice(0, 500)}`,
+            502
+          );
+        }
+        continue;
+      }
+
+      logger.info('[Surepass] ✅ DigiLocker session created successfully', {
+        url,
+        sessionId: String(sessionId).slice(0, 12) + '...',
+      });
+
+      return {
+        sessionId: String(sessionId),
+        authorizationUrl: String(authorizationUrl),
+      };
+    } catch (error: any) {
+      if (error instanceof AppError) throw error;
+
+      const status = error?.response?.status;
+      const errData = error?.response?.data;
+
+      // 404 means wrong path — try next
+      if (status === 404) {
+        logger.info('[Surepass] DigiLocker endpoint not found (404), trying next', { url });
+        lastError = error;
+        continue;
+      }
+
+      // 401/403 means right path but auth issue
+      if (status === 401 || status === 403) {
+        logger.error('[Surepass] DigiLocker auth error — token lacks DigiLocker scope', {
+          url,
+          status,
+          message: errData?.message,
+        });
+        throw new AppError(
+          errData?.message || 'Your Surepass token does not have DigiLocker API access. Please contact Surepass support.',
+          401
+        );
+      }
+
+      // Other errors — log and try next
+      logger.warn('[Surepass] DigiLocker endpoint error', {
+        url,
+        status,
+        message: error?.message,
+        data: typeof errData === 'string' ? errData.slice(0, 200) : JSON.stringify(errData)?.slice(0, 200),
+      });
+      lastError = error;
+    }
   }
+
+  // All paths failed
+  const msg = lastError?.response?.data?.message || lastError?.message || 'Failed to create DigiLocker session — all endpoint paths returned 404';
+  logger.error('[Surepass] All DigiLocker endpoint paths failed', { msg });
+  throw new AppError(msg, 502);
 };
 
 export type DigiLockerSessionStatus = {
