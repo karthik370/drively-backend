@@ -306,12 +306,22 @@ export const verifyDrivingLicenseStandalone = async (
   const { baseUrl } = getSurepassConfig();
   const url = `${baseUrl}/api/v1/driving-license/driving-license`;
 
-  // Surepass expects DOB in DD-MM-YYYY format
+  // Surepass DL API expects DOB in YYYY-MM-DD format
   let formattedDob = dob;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
-    // Convert YYYY-MM-DD to DD-MM-YYYY
-    const [y, m, d] = dob.split('-');
-    formattedDob = `${d}-${m}-${y}`;
+  if (/^\d{2}-\d{2}-\d{4}$/.test(dob)) {
+    // Convert DD-MM-YYYY to YYYY-MM-DD
+    const [d, m, y] = dob.split('-');
+    formattedDob = `${y}-${m}-${d}`;
+  } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(dob)) {
+    // Convert DD/MM/YYYY to YYYY-MM-DD
+    const [d, m, y] = dob.split('/');
+    formattedDob = `${y}-${m}-${d}`;
+  }
+
+  // Validate the date is real
+  const parsedDate = new Date(formattedDob);
+  if (isNaN(parsedDate.getTime())) {
+    throw new AppError(`Invalid date of birth: ${dob}`, 400);
   }
 
   logger.info('[Surepass] Verifying DL', {
