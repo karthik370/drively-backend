@@ -1,11 +1,13 @@
 /**
  * KYC Controller — REST Endpoints
  * ────────────────────────────────
- * POST   /kyc/initiate           → Start DigiLocker flow
- * GET    /kyc/status             → Get current KYC status
- * POST   /kyc/digilocker/check   → Check DigiLocker completion
- * POST   /kyc/fallback           → Submit PAN/DL manually (standalone APIs)
- * POST   /kyc/selfie             → Upload selfie + trigger face match
+ * POST   /kyc/initiate             → Start KYC flow
+ * GET    /kyc/status               → Get current KYC status
+ * POST   /kyc/aadhaar/send-otp     → Send Aadhaar OTP (Surepass)
+ * POST   /kyc/aadhaar/verify-otp   → Verify Aadhaar OTP (Surepass)
+ * POST   /kyc/digilocker/check     → Legacy: Check DigiLocker (returns status)
+ * POST   /kyc/fallback             → Submit PAN/DL manually (Surepass)
+ * POST   /kyc/selfie               → Upload selfie + trigger face match
  */
 import { Response } from 'express';
 import { v2 as cloudinary } from 'cloudinary';
@@ -14,6 +16,8 @@ import { AppError, asyncHandler } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import {
   initiateKyc,
+  sendAadhaarOtp,
+  verifyAadhaarOtp,
   checkDigiLockerCompletion,
   verifyMissingDocumentsFallback,
   submitSelfieAndFaceMatch,
@@ -23,7 +27,7 @@ import {
 export class KycController {
   /**
    * POST /kyc/initiate
-   * Starts the DigiLocker KYC flow. Returns a URL to open in WebView.
+   * Starts the KYC verification flow. Returns status AADHAAR_OTP_PENDING.
    */
   static initiate = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
@@ -37,8 +41,56 @@ export class KycController {
 
     res.status(200).json({
       success: true,
-      message: 'DigiLocker verification initiated',
+      message: 'KYC verification initiated',
       data: result,
+    });
+  });
+
+  /**
+   * POST /kyc/aadhaar/send-otp
+   * Send OTP to Aadhaar-linked mobile number.
+   * Body: { aadhaarNumber: "123412341234" }
+   */
+  static aadhaarSendOtp = asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw new AppError('Not authenticated', 401);
+
+    const aadhaarNumber = typeof req.body?.aadhaarNumber === 'string'
+      ? req.body.aadhaarNumber.trim()
+      : '';
+
+    if (!aadhaarNumber) {
+      throw new AppError('Aadhaar number is required', 400);
+    }
+
+    const result = await sendAadhaarOtp(req.user.id, aadhaarNumber);
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+      data: result,
+    });
+  });
+
+  /**
+   * POST /kyc/aadhaar/verify-otp
+   * Verify OTP received on Aadhaar-linked mobile.
+   * Body: { otp: "123456" }
+   */
+  static aadhaarVerifyOtp = asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw new AppError('Not authenticated', 401);
+
+    const otp = typeof req.body?.otp === 'string' ? req.body.otp.trim() : '';
+
+    if (!otp) {
+      throw new AppError('OTP is required', 400);
+    }
+
+    const status = await verifyAadhaarOtp(req.user.id, otp);
+
+    res.status(200).json({
+      success: true,
+      message: 'Aadhaar verified successfully',
+      data: status,
     });
   });
 

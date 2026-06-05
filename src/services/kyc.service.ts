@@ -1,11 +1,12 @@
 /**
- * KYC Service — Business Logic Orchestrator
- * ──────────────────────────────────────────
+ * KYC Service — Business Logic Orchestrator (Surepass)
+ * ─────────────────────────────────────────────────────
  * Manages the multi-step KYC verification flow:
- *   1. DigiLocker (Aadhaar + PAN + DL in one go)
- *   2. Standalone API fallback for missing docs
- *   3. Selfie upload + Face Match
- *   4. Auto-approve driver when all pass
+ *   1. Aadhaar OTP verification (via Surepass)
+ *   2. PAN verification (via Surepass)
+ *   3. DL verification (via Surepass)
+ *   4. Selfie upload + Face Match (vs Aadhaar photo)
+ *   5. Auto-approve driver when all pass
  */
 import prisma from '../config/database';
 import { KycStatus, KycDocumentSource, VerificationStatus } from '@prisma/client';
@@ -13,14 +14,12 @@ import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import axios from 'axios';
 import {
-  generateVerificationId,
-  createDigiLockerUrl,
-  getDigiLockerStatus,
-  getDigiLockerDocument,
+  aadhaarSendOtp as surepassAadhaarSendOtp,
+  aadhaarVerifyOtp as surepassAadhaarVerifyOtp,
   verifyPanStandalone,
   verifyDrivingLicenseStandalone,
   faceMatch,
-} from './cashfreeVerification';
+} from './surepassVerification';
 
 // ── Initiate KYC ───────────────────────────────────────────────────────────
 export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
@@ -30,237 +29,167 @@ export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
     throw new AppError('KYC already completed', 409);
   }
 
-  // Generate verification ID for Cashfree
-  const verificationId = generateVerificationId(userId);
-
-  // Build redirect URL — Cashfree requires https:// URLs
-  // If no valid https redirect URL is configured, omit it (app polls for status instead)
-  const configuredRedirectUrl = process.env.KYC_REDIRECT_URL || '';
-  const redirectUrl = configuredRedirectUrl.startsWith('https://') ? configuredRedirectUrl : undefined;
-
-  // Create DigiLocker URL via Cashfree
-  // Note: The Cashfree DigiLocker API does NOT accept identity_type/identity_value.
-  // It only needs verification_id and document_requested. The user logs in via DigiLocker portal.
-  const digilockerResult = await createDigiLockerUrl({
-    verificationId,
-    documentRequested: ['AADHAAR', 'PAN', 'DRIVING_LICENSE'],
-    redirectUrl,
-    userFlow: 'signup', // Allow both new and existing DigiLocker users
-  });
-
-  // Upsert KYC record
+  // With Surepass, we skip DigiLocker entirely.
+  // Just create/reset KYC record and set status to AADHAAR_OTP_PENDING
   const kyc = await prisma.kycVerification.upsert({
     where: { userId },
     create: {
       userId,
-      status: KycStatus.DIGILOCKER_PENDING,
-      digilockerVerificationId: digilockerResult.verificationId,
-      digilockerUrl: digilockerResult.url,
-      digilockerUrlExpiresAt: new Date(digilockerResult.expiresAt),
+      status: KycStatus.AADHAAR_OTP_PENDING,
     },
     update: {
-      status: KycStatus.DIGILOCKER_PENDING,
-      digilockerVerificationId: digilockerResult.verificationId,
-      digilockerUrl: digilockerResult.url,
-      digilockerUrlExpiresAt: new Date(digilockerResult.expiresAt),
+      status: KycStatus.AADHAAR_OTP_PENDING,
+      failureReason: null,
+      // Reset Aadhaar fields for fresh start
+      aadhaarVerified: false,
+      aadhaarName: null,
+      aadhaarDob: null,
+      aadhaarGender: null,
+      aadhaarAddress: null,
+      aadhaarClientId: null,
+      aadhaarPhotoUrl: null,
+    },
+  });
+
+  logger.info('[KYC] Initiated Surepass KYC flow', { userId });
+
+  return {
+    status: kyc.status,
+    message: 'KYC initiated. Please enter your Aadhaar number to begin verification.',
+  };
+};
+
+// ── Aadhaar: Send OTP ──────────────────────────────────────────────────────
+export const sendAadhaarOtp = async (userId: string, aadhaarNumber: string) => {
+  const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
+
+  // Allow from NOT_STARTED, AADHAAR_OTP_PENDING, or FAILED states
+  if (kyc && kyc.status !== KycStatus.NOT_STARTED &&
+    kyc.status !== KycStatus.AADHAAR_OTP_PENDING &&
+    kyc.status !== KycStatus.FAILED) {
+    // If Aadhaar already verified, skip
+    if (kyc.aadhaarVerified) {
+      throw new AppError('Aadhaar is already verified', 409);
+    }
+  }
+
+  // Validate Aadhaar format (12 digits)
+  const cleanAadhaar = aadhaarNumber.replace(/[\s\-]/g, '');
+  if (!/^\d{12}$/.test(cleanAadhaar)) {
+    throw new AppError('Invalid Aadhaar number. Must be 12 digits.', 400);
+  }
+
+  // Call Surepass to send OTP
+  const result = await surepassAadhaarSendOtp(cleanAadhaar);
+
+  // Store the client_id (OTP session ID) in DB
+  await prisma.kycVerification.upsert({
+    where: { userId },
+    create: {
+      userId,
+      status: KycStatus.AADHAAR_OTP_PENDING,
+      aadhaarClientId: result.clientId,
+    },
+    update: {
+      status: KycStatus.AADHAAR_OTP_PENDING,
+      aadhaarClientId: result.clientId,
       failureReason: null,
     },
   });
 
-  logger.info('[KYC] Initiated DigiLocker flow', {
-    userId,
-    verificationId: digilockerResult.verificationId,
-  });
+  logger.info('[KYC] Aadhaar OTP sent', { userId, clientId: result.clientId.slice(0, 8) + '...' });
 
   return {
-    digilockerUrl: digilockerResult.url,
-    verificationId: digilockerResult.verificationId,
-    status: kyc.status,
-    expiresAt: digilockerResult.expiresAt,
+    message: result.message,
+    status: 'AADHAAR_OTP_PENDING',
   };
 };
 
-// ── Check DigiLocker Completion ────────────────────────────────────────────
-export const checkDigiLockerCompletion = async (userId: string) => {
+// ── Aadhaar: Verify OTP ────────────────────────────────────────────────────
+export const verifyAadhaarOtp = async (userId: string, otp: string) => {
   const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
   if (!kyc) {
-    throw new AppError('KYC not initiated', 404);
+    throw new AppError('KYC not initiated. Please start verification first.', 404);
   }
 
-  if (!kyc.digilockerVerificationId) {
-    throw new AppError('No DigiLocker session found', 400);
+  if (!kyc.aadhaarClientId) {
+    throw new AppError('No Aadhaar OTP session found. Please request a new OTP.', 400);
   }
 
-  // If already past DigiLocker step, return current status
-  if (
-    kyc.status === KycStatus.COMPLETED ||
-    kyc.status === KycStatus.FACE_MATCH_PENDING ||
-    kyc.status === KycStatus.FALLBACK_PENDING
-  ) {
-    return getKycStatus(userId);
+  // Validate OTP format (6 digits)
+  const cleanOtp = otp.trim();
+  if (!/^\d{6}$/.test(cleanOtp)) {
+    throw new AppError('Invalid OTP. Must be 6 digits.', 400);
   }
 
-  // Fetch status from Cashfree
-  const result = await getDigiLockerStatus(kyc.digilockerVerificationId);
+  // Call Surepass to verify OTP
+  const result = await surepassAadhaarVerifyOtp(kyc.aadhaarClientId, cleanOtp);
 
-  logger.info('[KYC] DigiLocker status result', {
-    userId,
-    status: result.status,
-    documentsCount: result.documents.length,
-  });
-
-  // Check if authentication is complete
-  const isAuthenticated = ['AUTHENTICATED', 'COMPLETED', 'SUCCESS', 'CONSENT_APPROVED'].includes(result.status);
-
-  if (!isAuthenticated) {
-    // Still pending or failed
-    const isFailed = ['FAILED', 'REJECTED', 'EXPIRED', 'CONSENT_DENIED'].includes(result.status);
-    if (isFailed) {
-      await prisma.kycVerification.update({
-        where: { userId },
-        data: {
-          status: KycStatus.FAILED,
-          failureReason: `DigiLocker: ${result.status}. Please try again.`,
-          cashfreeResponse: result.rawResponse as any,
-        },
-      });
+  // Parse DOB
+  let aadhaarDob: Date | null = null;
+  if (result.dob) {
+    // Surepass may return DOB in DD-MM-YYYY or YYYY-MM-DD format
+    let dobStr = result.dob;
+    if (/^\d{2}-\d{2}-\d{4}$/.test(dobStr)) {
+      const [d, m, y] = dobStr.split('-');
+      dobStr = `${y}-${m}-${d}`;
     }
-    return getKycStatus(userId);
-  }
-
-  // DigiLocker authentication succeeded!
-  // If no documents were returned inline, fetch them separately
-  let documents = result.documents;
-
-  if (documents.length === 0) {
-    logger.info('[KYC] No documents in status response — fetching each document separately', { userId });
-
-    const docTypes = ['AADHAAR', 'PAN', 'DRIVING_LICENSE'];
-    for (const docType of docTypes) {
-      try {
-        const docData = await getDigiLockerDocument(kyc.digilockerVerificationId, docType);
-        logger.info('[KYC] Fetched document separately', {
-          userId,
-          docType,
-          hasData: Object.keys(docData).length > 0,
-          rawData: JSON.stringify(docData).slice(0, 500),
-        });
-
-        if (docData && Object.keys(docData).length > 0) {
-          documents.push({
-            documentType: docType,
-            status: 'SUCCESS',
-            data: docData,
-          });
-        }
-      } catch (e: any) {
-        logger.warn('[KYC] Could not fetch document', { userId, docType, error: e.message });
-        // Continue to next document — some might not be available
-      }
+    const parsed = new Date(dobStr);
+    if (!isNaN(parsed.getTime())) {
+      aadhaarDob = parsed;
     }
   }
 
-  // Extract document data
-  const updateData: Record<string, any> = {
-    cashfreeResponse: result.rawResponse,
-  };
-
-  let aadhaarDone = false;
-  let panDone = false;
-  let dlDone = false;
-
-  for (const doc of documents) {
-    const docStatus = doc.status.toUpperCase();
-    // Accept any non-error status
-    if (['ERROR', 'FAILED', 'REJECTED', 'NOT_FOUND'].includes(docStatus)) continue;
-
-    if (doc.documentType === 'AADHAAR') {
-      aadhaarDone = true;
-      updateData.aadhaarVerified = true;
-      updateData.aadhaarName = doc.data?.name || doc.data?.full_name || null;
-      updateData.aadhaarGender = doc.data?.gender || null;
-      updateData.aadhaarAddress = doc.data?.address || doc.data?.full_address || null;
-      updateData.aadhaarSource = KycDocumentSource.DIGILOCKER;
-
-      // Parse DOB
-      const dobStr = doc.data?.dob || doc.data?.date_of_birth || doc.data?.dateOfBirth;
-      if (dobStr) {
-        const parsed = new Date(dobStr);
-        if (!isNaN(parsed.getTime())) {
-          updateData.aadhaarDob = parsed;
-        }
-      }
-    }
-
-    if (doc.documentType === 'PAN') {
-      panDone = true;
-      updateData.panVerified = true;
-      updateData.panNumber = doc.data?.pan || doc.data?.pan_number || null;
-      updateData.panName = doc.data?.name || doc.data?.registered_name || null;
-      updateData.panSource = KycDocumentSource.DIGILOCKER;
-    }
-
-    if (doc.documentType === 'DRIVING_LICENSE') {
-      dlDone = true;
-      updateData.dlVerified = true;
-      updateData.dlNumber = doc.data?.dl_number || doc.data?.license_number || null;
-      updateData.dlName = doc.data?.name || null;
-      updateData.dlVehicleClass = Array.isArray(doc.data?.vehicle_class)
-        ? doc.data.vehicle_class.join(', ')
-        : String(doc.data?.vehicle_class || '');
-      updateData.dlSource = KycDocumentSource.DIGILOCKER;
-
-      const dlDob = doc.data?.dob || doc.data?.date_of_birth;
-      if (dlDob) {
-        const parsed = new Date(dlDob);
-        if (!isNaN(parsed.getTime())) updateData.dlDob = parsed;
-      }
-
-      const dlExpiry = doc.data?.expiry_date || doc.data?.doe || doc.data?.validity;
-      if (dlExpiry) {
-        const parsed = new Date(dlExpiry);
-        if (!isNaN(parsed.getTime())) updateData.dlExpiryDate = parsed;
-      }
-    }
-  }
-
-  // If status was AUTHENTICATED but no docs at all, still mark as partially done
-  // (at minimum, Aadhaar was verified via DigiLocker login itself)
-  if (isAuthenticated && !aadhaarDone && documents.length === 0) {
-    aadhaarDone = true;
-    updateData.aadhaarVerified = true;
-    updateData.aadhaarSource = KycDocumentSource.DIGILOCKER;
-    logger.info('[KYC] Marking Aadhaar as verified from DigiLocker authentication', { userId });
+  // Store Aadhaar photo — could be base64 or URL
+  let aadhaarPhotoUrl: string | null = null;
+  if (result.photo && result.photo.length > 50) {
+    // If it's base64, store it directly (we'll use it for face match)
+    // If it's a URL, also store it
+    aadhaarPhotoUrl = result.photo;
   }
 
   // Determine next status
-  if (aadhaarDone && panDone && dlDone) {
-    updateData.status = KycStatus.FACE_MATCH_PENDING;
-  } else if (aadhaarDone && (!panDone || !dlDone)) {
-    updateData.status = KycStatus.FALLBACK_PENDING;
-  } else {
-    // Aadhaar not verified — critical failure
-    updateData.status = KycStatus.FAILED;
-    updateData.failureReason = 'Aadhaar verification failed via DigiLocker. Please try again.';
+  let nextStatus: KycStatus = KycStatus.FALLBACK_PENDING; // Need PAN + DL next
+  if (kyc.panVerified && kyc.dlVerified) {
+    nextStatus = KycStatus.FACE_MATCH_PENDING;
   }
 
+  // Update KYC record with Aadhaar data
   await prisma.kycVerification.update({
     where: { userId },
-    data: updateData,
+    data: {
+      aadhaarVerified: true,
+      aadhaarName: result.fullName || null,
+      aadhaarDob,
+      aadhaarGender: result.gender || null,
+      aadhaarAddress: result.address || null,
+      aadhaarSource: KycDocumentSource.STANDALONE_API,
+      aadhaarPhotoUrl,
+      aadhaarClientId: null, // Clear session ID after use
+      status: nextStatus,
+      failureReason: null,
+      cashfreeResponse: result.rawResponse, // Store raw response for debugging (reusing existing field name)
+    },
   });
 
-  logger.info('[KYC] DigiLocker check complete', {
+  logger.info('[KYC] Aadhaar verified via OTP', {
     userId,
-    aadhaarDone,
-    panDone,
-    dlDone,
-    newStatus: updateData.status,
+    name: result.fullName,
+    hasPhoto: Boolean(aadhaarPhotoUrl),
+    nextStatus,
   });
 
   return getKycStatus(userId);
 };
 
-// ── Fallback: Verify Missing Documents via Standalone APIs ─────────────────
+// ── Check DigiLocker Completion (Legacy — for backward compatibility) ──────
+export const checkDigiLockerCompletion = async (userId: string) => {
+  // With Surepass, DigiLocker is not used.
+  // Return current KYC status
+  return getKycStatus(userId);
+};
+
+// ── Verify Missing Documents (PAN + DL) ────────────────────────────────────
 export const verifyMissingDocumentsFallback = async (
   userId: string,
   input: { panNumber?: string; dlNumber?: string; dob?: string }
@@ -270,10 +199,16 @@ export const verifyMissingDocumentsFallback = async (
     throw new AppError('KYC not initiated', 404);
   }
 
-  if (kyc.status !== KycStatus.FALLBACK_PENDING && kyc.status !== KycStatus.DIGILOCKER_COMPLETED) {
-    // Allow re-attempts from failed state too
-    if (kyc.status !== KycStatus.FAILED) {
-      throw new AppError(`Cannot submit fallback in current state: ${kyc.status}`, 400);
+  // Allow from FALLBACK_PENDING, DIGILOCKER_COMPLETED, or FAILED states
+  const allowedStatuses: KycStatus[] = [
+    KycStatus.FALLBACK_PENDING,
+    KycStatus.DIGILOCKER_COMPLETED,
+    KycStatus.FAILED,
+  ];
+  if (!allowedStatuses.includes(kyc.status)) {
+    // Also allow if Aadhaar is verified but docs are missing
+    if (!kyc.aadhaarVerified) {
+      throw new AppError('Please complete Aadhaar verification first.', 400);
     }
   }
 
@@ -306,9 +241,7 @@ export const verifyMissingDocumentsFallback = async (
     if (kyc.aadhaarDob) {
       dobStr = kyc.aadhaarDob.toISOString().split('T')[0]; // YYYY-MM-DD
     } else if (input.dob) {
-      // User provided DOB manually
-      dobStr = input.dob; // Expected format: YYYY-MM-DD
-      // Also save DOB to aadhaarDob for future use
+      dobStr = input.dob;
       const parsed = new Date(input.dob);
       if (!isNaN(parsed.getTime())) {
         updateData.aadhaarDob = parsed;
@@ -328,15 +261,25 @@ export const verifyMissingDocumentsFallback = async (
             ? dlResult.vehicleClass.join(', ')
             : String(dlResult.vehicleClass);
           updateData.dlSource = KycDocumentSource.STANDALONE_API;
-          // Save raw response so face match can use the DL photo
           updateData.cashfreeResponse = dlResult.rawResponse;
 
           if (dlResult.expiryDate) {
-            const parsed = new Date(dlResult.expiryDate);
+            // Parse DD-MM-YYYY or YYYY-MM-DD
+            let expiryStr = dlResult.expiryDate;
+            if (/^\d{2}-\d{2}-\d{4}$/.test(expiryStr)) {
+              const [d, m, y] = expiryStr.split('-');
+              expiryStr = `${y}-${m}-${d}`;
+            }
+            const parsed = new Date(expiryStr);
             if (!isNaN(parsed.getTime())) updateData.dlExpiryDate = parsed;
           }
           if (dlResult.dob) {
-            const parsed = new Date(dlResult.dob);
+            let dobParse = dlResult.dob;
+            if (/^\d{2}-\d{2}-\d{4}$/.test(dobParse)) {
+              const [d, m, y] = dobParse.split('-');
+              dobParse = `${y}-${m}-${d}`;
+            }
+            const parsed = new Date(dobParse);
             if (!isNaN(parsed.getTime())) updateData.dlDob = parsed;
           }
         } else {
@@ -368,7 +311,7 @@ export const verifyMissingDocumentsFallback = async (
     });
   }
 
-  logger.info('[KYC] Fallback verification complete', { userId, panOk, dlOk, errors });
+  logger.info('[KYC] Document verification complete', { userId, panOk, dlOk, errors });
 
   if (errors.length > 0) {
     throw new AppError(errors.join(' '), 400);
@@ -403,15 +346,19 @@ export const submitSelfieAndFaceMatch = async (
     selfieUrl,
   };
 
-  // For face match, we need a reference image (photo from DL or Aadhaar)
-  // The DL API returns a photo URL in details_of_driving_licence.photo
-  let referencePhoto = extractDocumentPhoto(kyc.cashfreeResponse);
+  // Get reference photo — Aadhaar photo from Surepass OTP verification
+  let referencePhoto = kyc.aadhaarPhotoUrl;
+
+  // Fallback: try to extract from cashfreeResponse (legacy data)
+  if (!referencePhoto) {
+    referencePhoto = extractDocumentPhoto(kyc.cashfreeResponse);
+  }
 
   let matchScore = 0;
   let matchPassed = false;
 
   if (referencePhoto) {
-    logger.info('[KYC] Found reference photo for face match', { userId, photoType: 'document' });
+    logger.info('[KYC] Found reference photo for face match', { userId, photoType: 'aadhaar' });
 
     // If reference is a URL, download it and convert to base64
     if (referencePhoto.startsWith('http')) {
@@ -435,12 +382,12 @@ export const submitSelfieAndFaceMatch = async (
       logger.error('[KYC] Face match API failed', { error: e.message });
       // If face match API fails entirely, allow through (soft fail in sandbox)
       matchPassed = true;
-      matchScore = 0.70;
+      matchScore = 70;
     }
   } else {
-    // No reference photo available — auto-pass (will have photo in production)
+    // No reference photo available — auto-pass (Surepass sandbox may not return photo)
     matchPassed = true;
-    matchScore = 0.70;
+    matchScore = 70;
     logger.info('[KYC] No reference photo for face match — auto-pass', { userId });
   }
 
@@ -453,7 +400,7 @@ export const submitSelfieAndFaceMatch = async (
     updateData.failureReason = null;
   } else {
     updateData.status = KycStatus.FAILED;
-    updateData.failureReason = `Face verification failed (score: ${(matchScore * 100).toFixed(0)}%). Please retake your selfie in good lighting.`;
+    updateData.failureReason = `Face verification failed (score: ${matchScore.toFixed(0)}%). Please retake your selfie in good lighting.`;
   }
 
   await prisma.kycVerification.update({
@@ -496,11 +443,6 @@ const autoApproveDriver = async (userId: string, kyc: any) => {
       if (kyc.dlNumber) profileUpdate.licenseNumber = kyc.dlNumber;
       if (kyc.dlExpiryDate) profileUpdate.licenseExpiryDate = kyc.dlExpiryDate;
       if (kyc.panNumber) profileUpdate.panNumber = kyc.panNumber;
-      if (kyc.aadhaarName) {
-        // Encrypt Aadhaar number for storage
-        // Note: DigiLocker doesn't return the full Aadhaar number, just verified name/DOB
-        // The aadhaarNumber in DriverProfile will keep its existing placeholder
-      }
 
       // Update selfie as profile image
       if (kyc.selfieUrl) {
@@ -549,22 +491,18 @@ export const getKycStatus = async (userId: string) => {
     faceMatchPassed: kyc.faceMatchPassed,
     faceMatchScore: kyc.faceMatchScore,
     failureReason: kyc.failureReason,
-    digilockerUrl: kyc.status === KycStatus.DIGILOCKER_PENDING ? kyc.digilockerUrl : null,
-    digilockerUrlExpiresAt: kyc.digilockerUrlExpiresAt
-      ? kyc.digilockerUrlExpiresAt.toISOString()
-      : null,
+    // Keep these fields in the response for backward compatibility
+    digilockerUrl: null as string | null,
+    digilockerUrlExpiresAt: null as string | null,
   };
 };
 
-// ── Helper: Extract Aadhaar photo from Cashfree response ───────────────────
+// ── Helper: Extract document photo from legacy cashfreeResponse ────────────
 const extractDocumentPhoto = (cashfreeResponse: any): string | null => {
   if (!cashfreeResponse) return null;
 
-  // Try various paths where Cashfree returns a photo
   const paths = [
-    // DL photo (most reliable — DL API returns this as a URL)
     cashfreeResponse?.details_of_driving_licence?.photo,
-    // Aadhaar photo from DigiLocker
     cashfreeResponse?.documents?.find?.((d: any) => d?.document_type === 'AADHAAR')?.data?.photo,
     cashfreeResponse?.aadhaar?.photo,
     cashfreeResponse?.aadhaar?.image,
@@ -573,7 +511,7 @@ const extractDocumentPhoto = (cashfreeResponse: any): string | null => {
 
   for (const p of paths) {
     if (typeof p === 'string' && p.length > 50) {
-      return p; // Could be a URL or base64 string
+      return p;
     }
   }
 

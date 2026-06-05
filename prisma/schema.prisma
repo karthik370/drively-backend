@@ -239,6 +239,7 @@ enum EmergencyStatus {
 
 enum KycStatus {
   NOT_STARTED
+  AADHAAR_OTP_PENDING
   DIGILOCKER_PENDING
   DIGILOCKER_COMPLETED
   FALLBACK_PENDING
@@ -1216,13 +1217,15 @@ model KycVerification {
   digilockerUrl             String?           @db.Text
   digilockerUrlExpiresAt    DateTime?
 
-  // Aadhaar (always from DigiLocker)
+  // Aadhaar (via Surepass OTP or DigiLocker)
   aadhaarVerified           Boolean           @default(false)
   aadhaarName               String?           @db.VarChar(255)
   aadhaarDob                DateTime?
   aadhaarGender             String?           @db.VarChar(20)
   aadhaarAddress            String?           @db.Text
   aadhaarSource             KycDocumentSource?
+  aadhaarClientId           String?           @db.VarChar(255)  // Surepass OTP session ID
+  aadhaarPhotoUrl           String?           @db.Text          // Aadhaar photo for face match
 
   // PAN
   panVerified               Boolean           @default(false)
