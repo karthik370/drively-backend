@@ -74,13 +74,15 @@ const getDigiLockerBaseUrl = () => {
 
 export type DigiLockerSessionResult = {
   clientId: string;    // Used to download Aadhaar later
-  sdkToken: string;    // JWT token passed to frontend DigiBoost SDK
+  sdkToken: string;    // JWT token (for web SDK usage)
+  digilockerUrl: string; // Direct URL to open in WebView
   expirySeconds: number;
 };
 
 /**
  * Step 1: Initialize a DigiLocker session.
- * Returns a client_id and SDK token for the frontend DigiBoost SDK.
+ * Returns a client_id, SDK token, and a direct URL for the DigiLocker consent flow.
+ * The URL can be loaded directly in a mobile WebView.
  */
 export const digilockerCreateSession = async (
   _redirectUrl?: string
@@ -109,12 +111,15 @@ export const digilockerCreateSession = async (
       success: data?.success,
       hasToken: Boolean(data?.data?.token),
       hasClientId: Boolean(data?.data?.client_id),
+      hasUrl: Boolean(data?.data?.url),
       expirySeconds: data?.data?.expiry_seconds,
       rawKeys: data?.data ? Object.keys(data.data) : [],
+      digilockerUrl: data?.data?.url ? data.data.url.slice(0, 80) + '...' : null,
     });
 
     const clientId = data?.data?.client_id;
     const sdkToken = data?.data?.token;
+    const digilockerUrl = data?.data?.url;
     const expirySeconds = data?.data?.expiry_seconds || 600;
 
     if (!clientId || !sdkToken) {
@@ -127,6 +132,7 @@ export const digilockerCreateSession = async (
     return {
       clientId: String(clientId),
       sdkToken: String(sdkToken),
+      digilockerUrl: digilockerUrl ? String(digilockerUrl) : '',
       expirySeconds: Number(expirySeconds),
     };
   } catch (error: any) {

@@ -79,20 +79,20 @@ export const initiateDigiLocker = async (userId: string) => {
   // Initialize DigiLocker via Surepass DigiBoost API
   const result = await digilockerCreateSession();
 
-  // Store client_id in DB for later Aadhaar download
+  // Store client_id and URL in DB for later Aadhaar download
   await prisma.kycVerification.upsert({
     where: { userId },
     create: {
       userId,
       status: KycStatus.DIGILOCKER_PENDING,
       digilockerVerificationId: result.clientId,
-      digilockerUrl: null,
+      digilockerUrl: result.digilockerUrl || null,
       digilockerUrlExpiresAt: new Date(Date.now() + result.expirySeconds * 1000),
     },
     update: {
       status: KycStatus.DIGILOCKER_PENDING,
       digilockerVerificationId: result.clientId,
-      digilockerUrl: null,
+      digilockerUrl: result.digilockerUrl || null,
       digilockerUrlExpiresAt: new Date(Date.now() + result.expirySeconds * 1000),
       failureReason: null,
     },
@@ -102,11 +102,13 @@ export const initiateDigiLocker = async (userId: string) => {
     userId,
     clientId: result.clientId.slice(0, 20) + '...',
     expirySeconds: result.expirySeconds,
+    hasUrl: Boolean(result.digilockerUrl),
   });
 
   return {
     sdkToken: result.sdkToken,
     clientId: result.clientId,
+    digilockerUrl: result.digilockerUrl,
     expirySeconds: result.expirySeconds,
     gateway: process.env.SUREPASS_ENV === 'PRODUCTION' ? 'production' : 'sandbox',
     status: 'DIGILOCKER_PENDING',
