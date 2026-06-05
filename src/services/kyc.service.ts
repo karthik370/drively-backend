@@ -448,15 +448,24 @@ const autoApproveDriver = async (userId: string, kyc: any) => {
       if (kyc.dlExpiryDate) profileUpdate.licenseExpiryDate = kyc.dlExpiryDate;
       if (kyc.panNumber) profileUpdate.panNumber = kyc.panNumber;
 
-      // Update selfie as profile image (must be a proper data URI for React Native Image)
+      // Update selfie as profile image
       if (kyc.selfieUrl) {
-        const selfieDataUri = kyc.selfieUrl.startsWith('data:')
-          ? kyc.selfieUrl
-          : `data:image/jpeg;base64,${kyc.selfieUrl}`;
+        let profileImageValue: string;
+        if (kyc.selfieUrl.startsWith('http')) {
+          // Already a Cloudinary URL — use directly
+          profileImageValue = kyc.selfieUrl;
+        } else if (kyc.selfieUrl.startsWith('data:')) {
+          // Already a data URI — use directly
+          profileImageValue = kyc.selfieUrl;
+        } else {
+          // Raw base64 — add data URI prefix
+          profileImageValue = `data:image/jpeg;base64,${kyc.selfieUrl}`;
+        }
         await tx.user.update({
           where: { id: userId },
-          data: { profileImage: selfieDataUri },
+          data: { profileImage: profileImageValue },
         });
+        logger.info('[KYC] Profile image set', { userId, type: kyc.selfieUrl.startsWith('http') ? 'url' : 'base64' });
       }
 
       await tx.driverProfile.update({
