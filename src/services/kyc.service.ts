@@ -384,9 +384,9 @@ export const submitSelfieAndFaceMatch = async (
       logger.info('[KYC] Face match result', { userId, matchScore, matchPassed });
     } catch (e: any) {
       logger.error('[KYC] Face match API failed', { error: e.message });
-      // If face match API fails entirely, allow through (soft fail in sandbox)
-      matchPassed = true;
-      matchScore = 70;
+      // Real face match failure — do NOT auto-pass
+      matchPassed = false;
+      matchScore = 0;
     }
   } else {
     // No reference photo available — auto-pass (Surepass sandbox may not return photo)

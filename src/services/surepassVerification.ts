@@ -389,7 +389,7 @@ export const verifyDrivingLicenseStandalone = async (
 
 // ── Face Match ─────────────────────────────────────────────────────────────
 export type FaceMatchResult = {
-  matchScore: number; // 0-100 percentage
+  matchScore: number; // 0-100 percentage (confidence)
   isMatch: boolean;
   rawResponse: any;
 };
@@ -398,8 +398,9 @@ export const faceMatch = async (
   selfieBase64: string,
   documentImageBase64: string
 ): Promise<FaceMatchResult> => {
-  const { baseUrl } = getSurepassConfig();
-  const url = `${baseUrl}/api/v1/face-match/face-match`;
+  const { baseUrl, apiToken } = getSurepassConfig();
+  // Correct endpoint: /api/v1/face/face-match (NOT /face-match/face-match)
+  const url = `${baseUrl}/api/v1/face/face-match`;
 
   const threshold = parseFloat(process.env.SUREPASS_FACE_MATCH_THRESHOLD || '70');
 
@@ -410,14 +411,29 @@ export const faceMatch = async (
     const cleanSelfie = selfieBase64.replace(/^data:image\/\w+;base64,/, '');
     const cleanDoc = documentImageBase64.replace(/^data:image\/\w+;base64,/, '');
 
-    const response = await axios.post(
-      url,
-      {
-        image1: cleanSelfie,
-        image2: cleanDoc,
+    // Convert base64 to Buffers for multipart upload
+    const selfieBuffer = Buffer.from(cleanSelfie, 'base64');
+    const docBuffer = Buffer.from(cleanDoc, 'base64');
+
+    // Build multipart/form-data using FormData
+    const FormData = (await import('form-data')).default;
+    const form = new FormData();
+    form.append('selfie', selfieBuffer, {
+      filename: 'selfie.jpg',
+      contentType: 'image/jpeg',
+    });
+    form.append('id_card', docBuffer, {
+      filename: 'id_card.jpg',
+      contentType: 'image/jpeg',
+    });
+
+    const response = await axios.post(url, form, {
+      headers: {
+        ...form.getHeaders(),
+        'Authorization': `Bearer ${apiToken}`,
       },
-      { headers: getHeaders(), timeout: 60000 }
-    );
+      timeout: 60000,
+    });
 
     const data = response.data;
 
@@ -429,11 +445,11 @@ export const faceMatch = async (
 
     const matchData = data?.data;
 
-    // Surepass returns match_score (0-100) and/or confidence
+    // Response: { match_status: true/false, confidence: 82.87 }
     const score = Number(
-      matchData?.match_score ?? matchData?.confidence ?? matchData?.score ?? 0
+      matchData?.confidence ?? matchData?.match_score ?? matchData?.score ?? 0
     );
-    const isMatchResult = matchData?.is_match ?? (score >= threshold);
+    const isMatchResult = matchData?.match_status ?? matchData?.is_match ?? (score >= threshold);
 
     return {
       matchScore: score,
