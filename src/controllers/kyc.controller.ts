@@ -3,9 +3,8 @@
  * ────────────────────────────────
  * POST   /kyc/initiate             → Start KYC flow
  * GET    /kyc/status               → Get current KYC status
- * POST   /kyc/aadhaar/send-otp     → Send Aadhaar OTP (Surepass)
- * POST   /kyc/aadhaar/verify-otp   → Verify Aadhaar OTP (Surepass)
- * POST   /kyc/digilocker/check     → Legacy: Check DigiLocker (returns status)
+ * POST   /kyc/digilocker/initiate  → Create DigiLocker session (Surepass)
+ * POST   /kyc/digilocker/check     → Check DigiLocker completion & fetch Aadhaar
  * POST   /kyc/fallback             → Submit PAN/DL manually (Surepass)
  * POST   /kyc/selfie               → Upload selfie + trigger face match
  */
@@ -16,8 +15,7 @@ import { AppError, asyncHandler } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import {
   initiateKyc,
-  sendAadhaarOtp,
-  verifyAadhaarOtp,
+  initiateDigiLocker,
   checkDigiLockerCompletion,
   verifyMissingDocumentsFallback,
   submitSelfieAndFaceMatch,
@@ -27,7 +25,7 @@ import {
 export class KycController {
   /**
    * POST /kyc/initiate
-   * Starts the KYC verification flow. Returns status AADHAAR_OTP_PENDING.
+   * Starts the KYC verification flow. Returns status DIGILOCKER_PENDING.
    */
   static initiate = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
@@ -47,49 +45,35 @@ export class KycController {
   });
 
   /**
-   * POST /kyc/aadhaar/send-otp
-   * Send OTP to Aadhaar-linked mobile number.
-   * Body: { aadhaarNumber: "123412341234" }
+   * POST /kyc/digilocker/initiate
+   * Creates a DigiLocker session via Surepass.
+   * Returns { digilockerUrl, sessionId } for the mobile app to open in WebView.
    */
-  static aadhaarSendOtp = asyncHandler(async (req: AuthRequest, res: Response) => {
+  static digilockerInitiate = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
 
-    const aadhaarNumber = typeof req.body?.aadhaarNumber === 'string'
-      ? req.body.aadhaarNumber.trim()
-      : '';
-
-    if (!aadhaarNumber) {
-      throw new AppError('Aadhaar number is required', 400);
-    }
-
-    const result = await sendAadhaarOtp(req.user.id, aadhaarNumber);
+    const result = await initiateDigiLocker(req.user.id);
 
     res.status(200).json({
       success: true,
-      message: result.message,
+      message: 'DigiLocker session created',
       data: result,
     });
   });
 
   /**
-   * POST /kyc/aadhaar/verify-otp
-   * Verify OTP received on Aadhaar-linked mobile.
-   * Body: { otp: "123456" }
+   * POST /kyc/digilocker/check
+   * Called after the driver returns from DigiLocker WebView.
+   * Checks session status and fetches Aadhaar data if completed.
    */
-  static aadhaarVerifyOtp = asyncHandler(async (req: AuthRequest, res: Response) => {
+  static checkDigiLocker = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
 
-    const otp = typeof req.body?.otp === 'string' ? req.body.otp.trim() : '';
-
-    if (!otp) {
-      throw new AppError('OTP is required', 400);
-    }
-
-    const status = await verifyAadhaarOtp(req.user.id, otp);
+    const status = await checkDigiLockerCompletion(req.user.id);
 
     res.status(200).json({
       success: true,
-      message: 'Aadhaar verified successfully',
+      message: 'DigiLocker status checked',
       data: status,
     });
   });
@@ -105,23 +89,6 @@ export class KycController {
 
     res.status(200).json({
       success: true,
-      data: status,
-    });
-  });
-
-  /**
-   * POST /kyc/digilocker/check
-   * Called after the driver returns from DigiLocker WebView.
-   * Polls Cashfree for the result and updates KYC records.
-   */
-  static checkDigiLocker = asyncHandler(async (req: AuthRequest, res: Response) => {
-    if (!req.user) throw new AppError('Not authenticated', 401);
-
-    const status = await checkDigiLockerCompletion(req.user.id);
-
-    res.status(200).json({
-      success: true,
-      message: 'DigiLocker status checked',
       data: status,
     });
   });

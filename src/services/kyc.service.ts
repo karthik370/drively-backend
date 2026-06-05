@@ -2,9 +2,9 @@
  * KYC Service — Business Logic Orchestrator (Surepass)
  * ─────────────────────────────────────────────────────
  * Manages the multi-step KYC verification flow:
- *   1. Aadhaar OTP verification (via Surepass)
- *   2. PAN verification (via Surepass)
- *   3. DL verification (via Surepass)
+ *   1. Aadhaar verification (via DigiLocker → Surepass)
+ *   2. PAN verification (via Surepass standalone)
+ *   3. DL verification (via Surepass standalone)
  *   4. Selfie upload + Face Match (vs Aadhaar photo)
  *   5. Auto-approve driver when all pass
  */
@@ -14,12 +14,16 @@ import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import axios from 'axios';
 import {
-  aadhaarSendOtp as surepassAadhaarSendOtp,
-  aadhaarVerifyOtp as surepassAadhaarVerifyOtp,
+  digilockerCreateSession,
+  digilockerGetSession,
+  digilockerFetchAadhaar,
   verifyPanStandalone,
   verifyDrivingLicenseStandalone,
   faceMatch,
 } from './surepassVerification';
+
+// ── DigiLocker redirect URL ────────────────────────────────────────────────
+const DIGILOCKER_REDIRECT_URL = process.env.DIGILOCKER_REDIRECT_URL || 'drivemate://kyc/digilocker-callback';
 
 // ── Initiate KYC ───────────────────────────────────────────────────────────
 export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
@@ -29,16 +33,15 @@ export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
     throw new AppError('KYC already completed', 409);
   }
 
-  // With Surepass, we skip DigiLocker entirely.
-  // Just create/reset KYC record and set status to AADHAAR_OTP_PENDING
+  // Create/reset KYC record and set status to DIGILOCKER_PENDING
   const kyc = await prisma.kycVerification.upsert({
     where: { userId },
     create: {
       userId,
-      status: KycStatus.AADHAAR_OTP_PENDING,
+      status: KycStatus.DIGILOCKER_PENDING,
     },
     update: {
-      status: KycStatus.AADHAAR_OTP_PENDING,
+      status: KycStatus.DIGILOCKER_PENDING,
       failureReason: null,
       // Reset Aadhaar fields for fresh start
       aadhaarVerified: false,
@@ -48,87 +51,107 @@ export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
       aadhaarAddress: null,
       aadhaarClientId: null,
       aadhaarPhotoUrl: null,
+      digilockerVerificationId: null,
+      digilockerUrl: null,
+      digilockerUrlExpiresAt: null,
     },
   });
 
-  logger.info('[KYC] Initiated Surepass KYC flow', { userId });
+  logger.info('[KYC] Initiated KYC flow (DigiLocker)', { userId });
 
   return {
     status: kyc.status,
-    message: 'KYC initiated. Please enter your Aadhaar number to begin verification.',
+    message: 'KYC initiated. Please complete Aadhaar verification via DigiLocker.',
   };
 };
 
-// ── Aadhaar: Send OTP ──────────────────────────────────────────────────────
-export const sendAadhaarOtp = async (userId: string, aadhaarNumber: string) => {
+// ── DigiLocker: Initiate Session ───────────────────────────────────────────
+export const initiateDigiLocker = async (userId: string) => {
   const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
 
-  // Allow from NOT_STARTED, AADHAAR_OTP_PENDING, or FAILED states
+  // Allow from NOT_STARTED, DIGILOCKER_PENDING, AADHAAR_OTP_PENDING, or FAILED states
   if (kyc && kyc.status !== KycStatus.NOT_STARTED &&
+    kyc.status !== KycStatus.DIGILOCKER_PENDING &&
     kyc.status !== KycStatus.AADHAAR_OTP_PENDING &&
     kyc.status !== KycStatus.FAILED) {
-    // If Aadhaar already verified, skip
     if (kyc.aadhaarVerified) {
       throw new AppError('Aadhaar is already verified', 409);
     }
   }
 
-  // Validate Aadhaar format (12 digits)
-  const cleanAadhaar = aadhaarNumber.replace(/[\s\-]/g, '');
-  if (!/^\d{12}$/.test(cleanAadhaar)) {
-    throw new AppError('Invalid Aadhaar number. Must be 12 digits.', 400);
-  }
+  // Create DigiLocker session via Surepass
+  const result = await digilockerCreateSession(DIGILOCKER_REDIRECT_URL);
 
-  // Call Surepass to send OTP
-  const result = await surepassAadhaarSendOtp(cleanAadhaar);
-
-  // Store the client_id (OTP session ID) in DB
+  // Store session in DB
   await prisma.kycVerification.upsert({
     where: { userId },
     create: {
       userId,
-      status: KycStatus.AADHAAR_OTP_PENDING,
-      aadhaarClientId: result.clientId,
+      status: KycStatus.DIGILOCKER_PENDING,
+      digilockerVerificationId: result.sessionId,
+      digilockerUrl: result.authorizationUrl,
+      digilockerUrlExpiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 min expiry
     },
     update: {
-      status: KycStatus.AADHAAR_OTP_PENDING,
-      aadhaarClientId: result.clientId,
+      status: KycStatus.DIGILOCKER_PENDING,
+      digilockerVerificationId: result.sessionId,
+      digilockerUrl: result.authorizationUrl,
+      digilockerUrlExpiresAt: new Date(Date.now() + 30 * 60 * 1000),
       failureReason: null,
     },
   });
 
-  logger.info('[KYC] Aadhaar OTP sent', { userId, clientId: result.clientId.slice(0, 8) + '...' });
+  logger.info('[KYC] DigiLocker session created', {
+    userId,
+    sessionId: result.sessionId.slice(0, 12) + '...',
+  });
 
   return {
-    message: result.message,
-    status: 'AADHAAR_OTP_PENDING',
+    digilockerUrl: result.authorizationUrl,
+    sessionId: result.sessionId,
+    status: 'DIGILOCKER_PENDING',
+    message: 'Please complete Aadhaar verification via DigiLocker.',
   };
 };
 
-// ── Aadhaar: Verify OTP ────────────────────────────────────────────────────
-export const verifyAadhaarOtp = async (userId: string, otp: string) => {
+// ── DigiLocker: Check Completion & Fetch Aadhaar ──────────────────────────
+export const checkDigiLockerCompletion = async (userId: string) => {
   const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
   if (!kyc) {
     throw new AppError('KYC not initiated. Please start verification first.', 404);
   }
 
-  if (!kyc.aadhaarClientId) {
-    throw new AppError('No Aadhaar OTP session found. Please request a new OTP.', 400);
+  // If Aadhaar already verified, just return status
+  if (kyc.aadhaarVerified) {
+    return getKycStatus(userId);
   }
 
-  // Validate OTP format (6 digits)
-  const cleanOtp = otp.trim();
-  if (!/^\d{6}$/.test(cleanOtp)) {
-    throw new AppError('Invalid OTP. Must be 6 digits.', 400);
+  // If no DigiLocker session exists, tell them to initiate
+  if (!kyc.digilockerVerificationId) {
+    throw new AppError('No DigiLocker session found. Please initiate verification first.', 400);
   }
 
-  // Call Surepass to verify OTP
-  const result = await surepassAadhaarVerifyOtp(kyc.aadhaarClientId, cleanOtp);
+  // Check session status with Surepass
+  const session = await digilockerGetSession(kyc.digilockerVerificationId);
+
+  if (!session.completed) {
+    logger.info('[KYC] DigiLocker session not yet completed', {
+      userId,
+      sessionStatus: session.status,
+    });
+    return {
+      ...await getKycStatus(userId),
+      digilockerStatus: session.status,
+      message: 'DigiLocker verification is still pending. Please complete the process.',
+    };
+  }
+
+  // Session completed — fetch Aadhaar data
+  const result = await digilockerFetchAadhaar(kyc.digilockerVerificationId);
 
   // Parse DOB
   let aadhaarDob: Date | null = null;
   if (result.dob) {
-    // Surepass may return DOB in DD-MM-YYYY or YYYY-MM-DD format
     let dobStr = result.dob;
     if (/^\d{2}-\d{2}-\d{4}$/.test(dobStr)) {
       const [d, m, y] = dobStr.split('-');
@@ -140,21 +163,19 @@ export const verifyAadhaarOtp = async (userId: string, otp: string) => {
     }
   }
 
-  // Store Aadhaar photo — could be base64 or URL
+  // Store Aadhaar photo
   let aadhaarPhotoUrl: string | null = null;
   if (result.photo && result.photo.length > 50) {
-    // If it's base64, store it directly (we'll use it for face match)
-    // If it's a URL, also store it
     aadhaarPhotoUrl = result.photo;
   }
 
   // Determine next status
-  let nextStatus: KycStatus = KycStatus.FALLBACK_PENDING; // Need PAN + DL next
+  let nextStatus: KycStatus = KycStatus.FALLBACK_PENDING;
   if (kyc.panVerified && kyc.dlVerified) {
     nextStatus = KycStatus.FACE_MATCH_PENDING;
   }
 
-  // Update KYC record with Aadhaar data
+  // Update KYC record with Aadhaar data from DigiLocker
   await prisma.kycVerification.update({
     where: { userId },
     data: {
@@ -163,29 +184,24 @@ export const verifyAadhaarOtp = async (userId: string, otp: string) => {
       aadhaarDob,
       aadhaarGender: result.gender || null,
       aadhaarAddress: result.address || null,
-      aadhaarSource: KycDocumentSource.STANDALONE_API,
+      aadhaarSource: KycDocumentSource.DIGILOCKER,
       aadhaarPhotoUrl,
-      aadhaarClientId: null, // Clear session ID after use
+      digilockerVerificationId: null, // Clear session after use
+      digilockerUrl: null,
+      digilockerUrlExpiresAt: null,
       status: nextStatus,
       failureReason: null,
-      cashfreeResponse: result.rawResponse, // Store raw response for debugging (reusing existing field name)
+      cashfreeResponse: result.rawResponse,
     },
   });
 
-  logger.info('[KYC] Aadhaar verified via OTP', {
+  logger.info('[KYC] Aadhaar verified via DigiLocker', {
     userId,
     name: result.fullName,
     hasPhoto: Boolean(aadhaarPhotoUrl),
     nextStatus,
   });
 
-  return getKycStatus(userId);
-};
-
-// ── Check DigiLocker Completion (Legacy — for backward compatibility) ──────
-export const checkDigiLockerCompletion = async (userId: string) => {
-  // With Surepass, DigiLocker is not used.
-  // Return current KYC status
   return getKycStatus(userId);
 };
 
@@ -491,9 +507,8 @@ export const getKycStatus = async (userId: string) => {
     faceMatchPassed: kyc.faceMatchPassed,
     faceMatchScore: kyc.faceMatchScore,
     failureReason: kyc.failureReason,
-    // Keep these fields in the response for backward compatibility
-    digilockerUrl: null as string | null,
-    digilockerUrlExpiresAt: null as string | null,
+    digilockerUrl: kyc.digilockerUrl,
+    digilockerUrlExpiresAt: kyc.digilockerUrlExpiresAt?.toISOString() || null,
   };
 };
 

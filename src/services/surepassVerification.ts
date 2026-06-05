@@ -1,10 +1,10 @@
 /**
  * Surepass Verification Suite — KYC APIs
  * ──────────────────────────────────────────────
- * Replaces Cashfree Secure ID with Surepass for:
- *   - Aadhaar verification (OTP-based, 2-step)
- *   - PAN verification
- *   - Driving License verification
+ * Uses Surepass for:
+ *   - Aadhaar verification (via DigiLocker consent flow)
+ *   - PAN verification (standalone API)
+ *   - Driving License verification (standalone API)
  *   - Face Match (selfie vs document photo)
  *   - Face Liveness check
  *
@@ -54,100 +54,159 @@ export const generateVerificationId = (userId: string): string => {
   return `kyc_${userId.slice(-8)}_${ts}_${rand}`.slice(0, 50);
 };
 
-// ── Aadhaar: Send OTP ──────────────────────────────────────────────────────
-// Step 1 of 2-step Aadhaar verification
-// Sends OTP to the mobile number linked with the Aadhaar
-export type AadhaarOtpResult = {
-  clientId: string; // Session ID needed for step 2
-  message: string;
+// ══════════════════════════════════════════════════════════════════════════
+// ── DigiLocker Verification (via Surepass SDK API) ────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// Flow:
+//   1. Create session → get authorization_url + session_id
+//   2. User opens URL in WebView, logs into DigiLocker, grants consent
+//   3. Poll session status until "completed"
+//   4. Fetch Aadhaar document data (name, DOB, gender, address, photo)
+
+export type DigiLockerSessionResult = {
+  sessionId: string;
+  authorizationUrl: string;
 };
 
-export const aadhaarSendOtp = async (
-  aadhaarNumber: string
-): Promise<AadhaarOtpResult> => {
+/**
+ * Step 1: Create a DigiLocker session.
+ * Returns a session_id and authorization_url to redirect the user to.
+ */
+export const digilockerCreateSession = async (
+  redirectUrl: string
+): Promise<DigiLockerSessionResult> => {
   const { baseUrl } = getSurepassConfig();
-  const url = `${baseUrl}/api/v1/aadhaar-v2/generate-otp`;
+  const url = `${baseUrl}/api/v1/digilocker/generate-url`;
 
-  // Clean Aadhaar number — remove spaces/dashes
-  const cleanAadhaar = aadhaarNumber.replace(/[\s\-]/g, '');
-
-  logger.info('[Surepass] Sending Aadhaar OTP', {
-    aadhaar: cleanAadhaar.slice(0, 4) + '********',
-    url,
-  });
+  logger.info('[Surepass] Creating DigiLocker session', { redirectUrl, url });
 
   try {
     const response = await axios.post(
       url,
-      { id_number: cleanAadhaar },
+      {
+        redirect_url: redirectUrl,
+      },
       { headers: getHeaders(), timeout: 30000 }
     );
 
     const data = response.data;
 
-    logger.info('[Surepass] Aadhaar OTP response', {
+    logger.info('[Surepass] DigiLocker session response', {
       statusCode: data?.status_code,
       success: data?.success,
-      hasClientId: Boolean(data?.data?.client_id),
+      hasUrl: Boolean(data?.data?.authorization_url || data?.data?.url),
+      hasSessionId: Boolean(data?.data?.session_id || data?.data?.client_id),
     });
 
-    const clientId = data?.data?.client_id;
-    if (!clientId) {
+    const sessionId = data?.data?.session_id || data?.data?.client_id || data?.data?.id;
+    const authorizationUrl = data?.data?.authorization_url || data?.data?.url || data?.data?.redirect_url;
+
+    if (!sessionId || !authorizationUrl) {
       throw new AppError(
-        data?.message || 'Failed to send Aadhaar OTP — no session ID returned',
+        data?.message || 'Failed to create DigiLocker session — missing session ID or URL',
         502
       );
     }
 
     return {
-      clientId: String(clientId),
-      message: data?.message || 'OTP sent successfully',
+      sessionId: String(sessionId),
+      authorizationUrl: String(authorizationUrl),
     };
   } catch (error: any) {
     if (error instanceof AppError) throw error;
-    logger.error('[Surepass] Aadhaar send OTP failed', {
+    logger.error('[Surepass] DigiLocker create session failed', {
       status: error?.response?.status,
       data: error?.response?.data,
       message: error?.message,
     });
-    const msg = error?.response?.data?.message || error?.message || 'Failed to send Aadhaar OTP';
+    const msg = error?.response?.data?.message || error?.message || 'Failed to create DigiLocker session';
     throw new AppError(msg, error?.response?.status || 502);
   }
 };
 
-// ── Aadhaar: Verify OTP ────────────────────────────────────────────────────
-// Step 2 of 2-step Aadhaar verification
-// Returns full Aadhaar details including photo
-export type AadhaarVerifyResult = {
+export type DigiLockerSessionStatus = {
+  status: string; // "pending", "completed", "failed", etc.
+  completed: boolean;
+  rawResponse: any;
+};
+
+/**
+ * Step 2: Check DigiLocker session status.
+ * Call this after the user completes the DigiLocker consent flow.
+ */
+export const digilockerGetSession = async (
+  sessionId: string
+): Promise<DigiLockerSessionStatus> => {
+  const { baseUrl } = getSurepassConfig();
+  const url = `${baseUrl}/api/v1/digilocker/session-status/${sessionId}`;
+
+  logger.info('[Surepass] Checking DigiLocker session', { sessionId: sessionId.slice(0, 12) + '...', url });
+
+  try {
+    const response = await axios.get(url, {
+      headers: getHeaders(),
+      timeout: 30000,
+    });
+
+    const data = response.data;
+
+    logger.info('[Surepass] DigiLocker session status', {
+      statusCode: data?.status_code,
+      success: data?.success,
+      sessionStatus: data?.data?.status,
+    });
+
+    const sessionStatus = data?.data?.status || '';
+    const completed = ['completed', 'succeeded', 'success'].includes(sessionStatus.toLowerCase());
+
+    return {
+      status: sessionStatus,
+      completed,
+      rawResponse: data,
+    };
+  } catch (error: any) {
+    if (error instanceof AppError) throw error;
+    logger.error('[Surepass] DigiLocker session check failed', {
+      status: error?.response?.status,
+      data: error?.response?.data,
+      message: error?.message,
+    });
+    const msg = error?.response?.data?.message || error?.message || 'Failed to check DigiLocker session';
+    throw new AppError(msg, error?.response?.status || 502);
+  }
+};
+
+export type DigiLockerAadhaarResult = {
   verified: boolean;
   fullName: string;
   dob: string;
   gender: string;
   address: string;
-  photo: string; // Base64 photo from Aadhaar — used for face match
-  aadhaarNumber: string; // Last 4 digits masked
+  photo: string; // Base64 or URL — used for face match
+  aadhaarNumber: string; // Masked
   rawResponse: any;
 };
 
-export const aadhaarVerifyOtp = async (
-  clientId: string,
-  otp: string
-): Promise<AadhaarVerifyResult> => {
+/**
+ * Step 3: Fetch Aadhaar document data from a completed DigiLocker session.
+ */
+export const digilockerFetchAadhaar = async (
+  sessionId: string
+): Promise<DigiLockerAadhaarResult> => {
   const { baseUrl } = getSurepassConfig();
-  const url = `${baseUrl}/api/v1/aadhaar-v2/submit-otp`;
+  const url = `${baseUrl}/api/v1/digilocker/aadhaar/${sessionId}`;
 
-  logger.info('[Surepass] Verifying Aadhaar OTP', { clientId: clientId.slice(0, 8) + '...', url });
+  logger.info('[Surepass] Fetching Aadhaar from DigiLocker', { sessionId: sessionId.slice(0, 12) + '...' });
 
   try {
-    const response = await axios.post(
-      url,
-      { client_id: clientId, otp: otp },
-      { headers: getHeaders(), timeout: 30000 }
-    );
+    const response = await axios.get(url, {
+      headers: getHeaders(),
+      timeout: 30000,
+    });
 
     const data = response.data;
 
-    logger.info('[Surepass] Aadhaar verify response', {
+    logger.info('[Surepass] DigiLocker Aadhaar fetch response', {
       statusCode: data?.status_code,
       success: data?.success,
       hasData: Boolean(data?.data),
@@ -156,12 +215,12 @@ export const aadhaarVerifyOtp = async (
     const aadhaarData = data?.data;
     if (!aadhaarData || !data?.success) {
       throw new AppError(
-        data?.message || 'Aadhaar OTP verification failed',
+        data?.message || 'Failed to fetch Aadhaar data from DigiLocker',
         400
       );
     }
 
-    // Parse address — Surepass returns split address or full address
+    // Parse address — may be string or structured object
     const address = aadhaarData?.address
       ? (typeof aadhaarData.address === 'object'
         ? [
@@ -190,12 +249,12 @@ export const aadhaarVerifyOtp = async (
     };
   } catch (error: any) {
     if (error instanceof AppError) throw error;
-    logger.error('[Surepass] Aadhaar verify OTP failed', {
+    logger.error('[Surepass] DigiLocker Aadhaar fetch failed', {
       status: error?.response?.status,
       data: error?.response?.data,
       message: error?.message,
     });
-    const msg = error?.response?.data?.message || error?.message || 'Aadhaar OTP verification failed';
+    const msg = error?.response?.data?.message || error?.message || 'Failed to fetch Aadhaar from DigiLocker';
     throw new AppError(msg, error?.response?.status || 502);
   }
 };

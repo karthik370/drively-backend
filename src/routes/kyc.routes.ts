@@ -11,14 +11,11 @@ router.use(requireDriver);
 router.post('/initiate', KycController.initiate);
 router.get('/status', KycController.getStatus);
 
-// Aadhaar OTP verification (Surepass)
-router.post('/aadhaar/send-otp', KycController.aadhaarSendOtp);
-router.post('/aadhaar/verify-otp', KycController.aadhaarVerifyOtp);
-
-// Legacy: DigiLocker check (now just returns current status)
+// DigiLocker verification (Surepass)
+router.post('/digilocker/initiate', KycController.digilockerInitiate);
 router.post('/digilocker/check', KycController.checkDigiLocker);
 
-// PAN + DL verification (Surepass)
+// PAN + DL verification (Surepass standalone)
 router.post('/fallback', KycController.fallback);
 
 // Selfie + Face match (Surepass)
