@@ -448,11 +448,14 @@ const autoApproveDriver = async (userId: string, kyc: any) => {
       if (kyc.dlExpiryDate) profileUpdate.licenseExpiryDate = kyc.dlExpiryDate;
       if (kyc.panNumber) profileUpdate.panNumber = kyc.panNumber;
 
-      // Update selfie as profile image
+      // Update selfie as profile image (must be a proper data URI for React Native Image)
       if (kyc.selfieUrl) {
+        const selfieDataUri = kyc.selfieUrl.startsWith('data:')
+          ? kyc.selfieUrl
+          : `data:image/jpeg;base64,${kyc.selfieUrl}`;
         await tx.user.update({
           where: { id: userId },
-          data: { profileImage: kyc.selfieUrl },
+          data: { profileImage: selfieDataUri },
         });
       }
 

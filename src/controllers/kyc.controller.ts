@@ -22,6 +22,13 @@ import {
   getKycStatus,
 } from '../services/kyc.service';
 
+// Configure Cloudinary from Railway env vars
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
 export class KycController {
   /**
    * POST /kyc/initiate
@@ -158,14 +165,17 @@ export class KycController {
       const folder = `drivemate/${req.user.id}/kyc-selfie`;
       const publicId = `selfie_${Date.now()}`;
 
+      logger.info('[KYC] Uploading selfie to Cloudinary', { folder, publicId, cloudName: process.env.CLOUDINARY_CLOUD_NAME });
+
       const uploadResult = await cloudinary.uploader.upload(
         `data:${mime};base64,${base64}`,
         { folder, public_id: publicId, resource_type: 'image', overwrite: true }
       );
       selfieUrl = uploadResult.secure_url;
+      logger.info('[KYC] Selfie uploaded to Cloudinary', { url: selfieUrl });
     } catch (err: any) {
-      logger.error('[KYC] Selfie upload to Cloudinary failed', { error: err?.message });
-      throw new AppError('Failed to upload selfie', 502);
+      logger.error('[KYC] Selfie upload to Cloudinary failed', { error: err?.message, cloudName: process.env.CLOUDINARY_CLOUD_NAME });
+      throw new AppError(`Failed to upload selfie: ${err?.message}`, 502);
     }
 
     // Run face match
