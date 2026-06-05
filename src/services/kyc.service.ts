@@ -15,15 +15,12 @@ import { logger } from '../utils/logger';
 import axios from 'axios';
 import {
   digilockerCreateSession,
-  digilockerGetSession,
   digilockerFetchAadhaar,
   verifyPanStandalone,
   verifyDrivingLicenseStandalone,
   faceMatch,
 } from './surepassVerification';
 
-// ── DigiLocker redirect URL ────────────────────────────────────────────────
-const DIGILOCKER_REDIRECT_URL = process.env.DIGILOCKER_REDIRECT_URL || 'drivemate://kyc/digilocker-callback';
 
 // ── Initiate KYC ───────────────────────────────────────────────────────────
 export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
@@ -65,7 +62,7 @@ export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
   };
 };
 
-// ── DigiLocker: Initiate Session ───────────────────────────────────────────
+// ── DigiLocker: Initialize Session ───────────────────────────────────────
 export const initiateDigiLocker = async (userId: string) => {
   const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
 
@@ -79,42 +76,46 @@ export const initiateDigiLocker = async (userId: string) => {
     }
   }
 
-  // Create DigiLocker session via Surepass
-  const result = await digilockerCreateSession(DIGILOCKER_REDIRECT_URL);
+  // Initialize DigiLocker via Surepass DigiBoost API
+  const result = await digilockerCreateSession();
 
-  // Store session in DB
+  // Store client_id in DB for later Aadhaar download
   await prisma.kycVerification.upsert({
     where: { userId },
     create: {
       userId,
       status: KycStatus.DIGILOCKER_PENDING,
-      digilockerVerificationId: result.sessionId,
-      digilockerUrl: result.authorizationUrl,
-      digilockerUrlExpiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 min expiry
+      digilockerVerificationId: result.clientId,
+      digilockerUrl: null,
+      digilockerUrlExpiresAt: new Date(Date.now() + result.expirySeconds * 1000),
     },
     update: {
       status: KycStatus.DIGILOCKER_PENDING,
-      digilockerVerificationId: result.sessionId,
-      digilockerUrl: result.authorizationUrl,
-      digilockerUrlExpiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      digilockerVerificationId: result.clientId,
+      digilockerUrl: null,
+      digilockerUrlExpiresAt: new Date(Date.now() + result.expirySeconds * 1000),
       failureReason: null,
     },
   });
 
-  logger.info('[KYC] DigiLocker session created', {
+  logger.info('[KYC] DigiLocker session initialized', {
     userId,
-    sessionId: result.sessionId.slice(0, 12) + '...',
+    clientId: result.clientId.slice(0, 20) + '...',
+    expirySeconds: result.expirySeconds,
   });
 
   return {
-    digilockerUrl: result.authorizationUrl,
-    sessionId: result.sessionId,
+    sdkToken: result.sdkToken,
+    clientId: result.clientId,
+    expirySeconds: result.expirySeconds,
+    gateway: process.env.SUREPASS_ENV === 'PRODUCTION' ? 'production' : 'sandbox',
     status: 'DIGILOCKER_PENDING',
     message: 'Please complete Aadhaar verification via DigiLocker.',
   };
 };
 
 // ── DigiLocker: Check Completion & Fetch Aadhaar ──────────────────────────
+// Called after the frontend DigiBoost SDK fires onSuccess
 export const checkDigiLockerCompletion = async (userId: string) => {
   const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
   if (!kyc) {
@@ -126,27 +127,12 @@ export const checkDigiLockerCompletion = async (userId: string) => {
     return getKycStatus(userId);
   }
 
-  // If no DigiLocker session exists, tell them to initiate
+  // If no DigiLocker client_id exists, tell them to initiate
   if (!kyc.digilockerVerificationId) {
     throw new AppError('No DigiLocker session found. Please initiate verification first.', 400);
   }
 
-  // Check session status with Surepass
-  const session = await digilockerGetSession(kyc.digilockerVerificationId);
-
-  if (!session.completed) {
-    logger.info('[KYC] DigiLocker session not yet completed', {
-      userId,
-      sessionStatus: session.status,
-    });
-    return {
-      ...await getKycStatus(userId),
-      digilockerStatus: session.status,
-      message: 'DigiLocker verification is still pending. Please complete the process.',
-    };
-  }
-
-  // Session completed — fetch Aadhaar data
+  // Download Aadhaar data using the client_id
   const result = await digilockerFetchAadhaar(kyc.digilockerVerificationId);
 
   // Parse DOB

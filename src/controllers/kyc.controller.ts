@@ -46,8 +46,8 @@ export class KycController {
 
   /**
    * POST /kyc/digilocker/initiate
-   * Creates a DigiLocker session via Surepass.
-   * Returns { digilockerUrl, sessionId } for the mobile app to open in WebView.
+   * Initializes a DigiLocker session via Surepass DigiBoost API.
+   * Returns { sdkToken, clientId, gateway, expirySeconds } for the mobile app SDK.
    */
   static digilockerInitiate = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
@@ -56,15 +56,15 @@ export class KycController {
 
     res.status(200).json({
       success: true,
-      message: 'DigiLocker session created',
+      message: 'DigiLocker session initialized',
       data: result,
     });
   });
 
   /**
    * POST /kyc/digilocker/check
-   * Called after the driver returns from DigiLocker WebView.
-   * Checks session status and fetches Aadhaar data if completed.
+   * Called after the DigiBoost SDK fires onSuccess on the frontend.
+   * Downloads Aadhaar data using the stored client_id.
    */
   static checkDigiLocker = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);

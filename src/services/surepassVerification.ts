@@ -55,194 +55,88 @@ export const generateVerificationId = (userId: string): string => {
 };
 
 // ══════════════════════════════════════════════════════════════════════════
-// ── DigiLocker Verification (via Surepass SDK API) ────────────────────────
+// ── DigiLocker Verification (via Surepass DigiBoost SDK) ──────────────────
 // ══════════════════════════════════════════════════════════════════════════
-// Flow:
-//   1. Create session → get authorization_url + session_id
-//   2. User opens URL in WebView, logs into DigiLocker, grants consent
-//   3. Poll session status until "completed"
-//   4. Fetch Aadhaar document data (name, DOB, gender, address, photo)
+// Flow (from official Surepass DigiBoost Web SDK):
+//   1. Backend calls POST /api/v1/digilocker/initialize → gets { client_id, token }
+//   2. Frontend loads DigiBoost SDK with that token → opens DigiLocker popup
+//   3. User consents in popup → SDK fires onSuccess callback
+//   4. Backend calls GET /api/v1/digilocker/download-aadhaar/{client_id} → gets Aadhaar XML data
+//
+// IMPORTANT: DigiLocker uses a DIFFERENT domain: sandbox.surepass.app (not sandbox.surepass.io)
+
+const getDigiLockerBaseUrl = () => {
+  const env = process.env.SUREPASS_ENV === 'PRODUCTION' ? 'PRODUCTION' : 'SANDBOX';
+  return env === 'PRODUCTION'
+    ? 'https://kyc-api.surepass.app'
+    : 'https://sandbox.surepass.app';
+};
 
 export type DigiLockerSessionResult = {
-  sessionId: string;
-  authorizationUrl: string;
+  clientId: string;    // Used to download Aadhaar later
+  sdkToken: string;    // JWT token passed to frontend DigiBoost SDK
+  expirySeconds: number;
 };
 
 /**
- * Step 1: Create a DigiLocker session.
- * Returns a session_id and authorization_url to redirect the user to.
- *
- * Note: Tries multiple possible endpoint paths since Surepass docs are
- * behind authentication and the exact path is not publicly documented.
+ * Step 1: Initialize a DigiLocker session.
+ * Returns a client_id and SDK token for the frontend DigiBoost SDK.
  */
 export const digilockerCreateSession = async (
-  redirectUrl: string
+  _redirectUrl?: string
 ): Promise<DigiLockerSessionResult> => {
-  const { baseUrl } = getSurepassConfig();
+  const baseUrl = getDigiLockerBaseUrl();
+  const url = `${baseUrl}/api/v1/digilocker/initialize`;
 
-  // Possible endpoint paths (try in order)
-  const possiblePaths = [
-    '/api/v1/digilocker/generate-url',
-    '/api/v1/digilocker-sdk/generate-url',
-    '/api/v1/digilocker/initiate',
-    '/api/v1/digilocker-sdk/sessions/create',
-    '/api/v1/digilocker/url',
-    '/api/v1/digilocker/create-session',
-    '/api/v1/digilocker/session',
-  ];
-
-  const requestBody = {
-    redirect_url: redirectUrl,
-  };
-
-  logger.info('[Surepass] Creating DigiLocker session', { redirectUrl, paths: possiblePaths.length });
-
-  let lastError: any = null;
-
-  for (const path of possiblePaths) {
-    const url = `${baseUrl}${path}`;
-    try {
-      logger.info('[Surepass] Trying DigiLocker endpoint', { url });
-
-      const response = await axios.post(
-        url,
-        requestBody,
-        { headers: getHeaders(), timeout: 15000 }
-      );
-
-      const data = response.data;
-
-      logger.info('[Surepass] DigiLocker session response', {
-        url,
-        statusCode: data?.status_code,
-        success: data?.success,
-        dataKeys: data?.data ? Object.keys(data.data) : [],
-        rawData: JSON.stringify(data).slice(0, 500),
-      });
-
-      const sessionId = data?.data?.session_id || data?.data?.client_id || data?.data?.id;
-      const authorizationUrl = data?.data?.authorization_url || data?.data?.url || data?.data?.redirect_url;
-
-      if (!sessionId || !authorizationUrl) {
-        // API responded but didn't have expected fields — log and try parsing differently
-        logger.warn('[Surepass] DigiLocker response missing expected fields', {
-          url,
-          hasSessionId: Boolean(sessionId),
-          hasAuthUrl: Boolean(authorizationUrl),
-          data: JSON.stringify(data).slice(0, 1000),
-        });
-
-        // If we got a response but no expected fields, it might still be the right endpoint
-        // with a different response structure — throw with the data for debugging
-        if (data?.success || data?.status_code === 200) {
-          throw new AppError(
-            `DigiLocker endpoint ${path} responded but returned unexpected structure. Raw: ${JSON.stringify(data).slice(0, 500)}`,
-            502
-          );
-        }
-        continue;
-      }
-
-      logger.info('[Surepass] ✅ DigiLocker session created successfully', {
-        url,
-        sessionId: String(sessionId).slice(0, 12) + '...',
-      });
-
-      return {
-        sessionId: String(sessionId),
-        authorizationUrl: String(authorizationUrl),
-      };
-    } catch (error: any) {
-      if (error instanceof AppError) throw error;
-
-      const status = error?.response?.status;
-      const errData = error?.response?.data;
-
-      // 404 means wrong path — try next
-      if (status === 404) {
-        logger.info('[Surepass] DigiLocker endpoint not found (404), trying next', { url });
-        lastError = error;
-        continue;
-      }
-
-      // 401/403 means right path but auth issue
-      if (status === 401 || status === 403) {
-        logger.error('[Surepass] DigiLocker auth error — token lacks DigiLocker scope', {
-          url,
-          status,
-          message: errData?.message,
-        });
-        throw new AppError(
-          errData?.message || 'Your Surepass token does not have DigiLocker API access. Please contact Surepass support.',
-          401
-        );
-      }
-
-      // Other errors — log and try next
-      logger.warn('[Surepass] DigiLocker endpoint error', {
-        url,
-        status,
-        message: error?.message,
-        data: typeof errData === 'string' ? errData.slice(0, 200) : JSON.stringify(errData)?.slice(0, 200),
-      });
-      lastError = error;
-    }
-  }
-
-  // All paths failed
-  const msg = lastError?.response?.data?.message || lastError?.message || 'Failed to create DigiLocker session — all endpoint paths returned 404';
-  logger.error('[Surepass] All DigiLocker endpoint paths failed', { msg });
-  throw new AppError(msg, 502);
-};
-
-export type DigiLockerSessionStatus = {
-  status: string; // "pending", "completed", "failed", etc.
-  completed: boolean;
-  rawResponse: any;
-};
-
-/**
- * Step 2: Check DigiLocker session status.
- * Call this after the user completes the DigiLocker consent flow.
- */
-export const digilockerGetSession = async (
-  sessionId: string
-): Promise<DigiLockerSessionStatus> => {
-  const { baseUrl } = getSurepassConfig();
-  const url = `${baseUrl}/api/v1/digilocker/session-status/${sessionId}`;
-
-  logger.info('[Surepass] Checking DigiLocker session', { sessionId: sessionId.slice(0, 12) + '...', url });
+  logger.info('[Surepass] Initializing DigiLocker session', { url });
 
   try {
-    const response = await axios.get(url, {
-      headers: getHeaders(),
-      timeout: 30000,
-    });
+    const response = await axios.post(
+      url,
+      {
+        data: {
+          signup_flow: true,
+          skip_main_screen: false,
+        },
+      },
+      { headers: getHeaders(), timeout: 30000 }
+    );
 
     const data = response.data;
 
-    logger.info('[Surepass] DigiLocker session status', {
+    logger.info('[Surepass] DigiLocker initialize response', {
       statusCode: data?.status_code,
       success: data?.success,
-      sessionStatus: data?.data?.status,
+      hasToken: Boolean(data?.data?.token),
+      hasClientId: Boolean(data?.data?.client_id),
+      expirySeconds: data?.data?.expiry_seconds,
+      rawKeys: data?.data ? Object.keys(data.data) : [],
     });
 
-    const sessionStatus = data?.data?.status || '';
-    const completed = ['completed', 'succeeded', 'success'].includes(sessionStatus.toLowerCase());
+    const clientId = data?.data?.client_id;
+    const sdkToken = data?.data?.token;
+    const expirySeconds = data?.data?.expiry_seconds || 600;
+
+    if (!clientId || !sdkToken) {
+      throw new AppError(
+        data?.message || 'Failed to initialize DigiLocker — missing client_id or token',
+        502
+      );
+    }
 
     return {
-      status: sessionStatus,
-      completed,
-      rawResponse: data,
+      clientId: String(clientId),
+      sdkToken: String(sdkToken),
+      expirySeconds: Number(expirySeconds),
     };
   } catch (error: any) {
     if (error instanceof AppError) throw error;
-    logger.error('[Surepass] DigiLocker session check failed', {
+    logger.error('[Surepass] DigiLocker initialize failed', {
       status: error?.response?.status,
       data: error?.response?.data,
       message: error?.message,
     });
-    const msg = error?.response?.data?.message || error?.message || 'Failed to check DigiLocker session';
+    const msg = error?.response?.data?.message || error?.message || 'Failed to initialize DigiLocker';
     throw new AppError(msg, error?.response?.status || 502);
   }
 };
@@ -253,21 +147,22 @@ export type DigiLockerAadhaarResult = {
   dob: string;
   gender: string;
   address: string;
-  photo: string; // Base64 or URL — used for face match
-  aadhaarNumber: string; // Masked
+  photo: string; // Base64 profile_image from Aadhaar XML — used for face match
+  aadhaarNumber: string; // Masked (XXXXXXXX1234)
   rawResponse: any;
 };
 
 /**
- * Step 3: Fetch Aadhaar document data from a completed DigiLocker session.
+ * Step 2: Download Aadhaar XML data after DigiLocker verification is complete.
+ * Called after the frontend SDK fires onSuccess.
  */
 export const digilockerFetchAadhaar = async (
-  sessionId: string
+  clientId: string
 ): Promise<DigiLockerAadhaarResult> => {
-  const { baseUrl } = getSurepassConfig();
-  const url = `${baseUrl}/api/v1/digilocker/aadhaar/${sessionId}`;
+  const baseUrl = getDigiLockerBaseUrl();
+  const url = `${baseUrl}/api/v1/digilocker/download-aadhaar/${clientId}`;
 
-  logger.info('[Surepass] Fetching Aadhaar from DigiLocker', { sessionId: sessionId.slice(0, 12) + '...' });
+  logger.info('[Surepass] Downloading Aadhaar from DigiLocker', { clientId: clientId.slice(0, 20) + '...' });
 
   try {
     const response = await axios.get(url, {
@@ -277,21 +172,25 @@ export const digilockerFetchAadhaar = async (
 
     const data = response.data;
 
-    logger.info('[Surepass] DigiLocker Aadhaar fetch response', {
+    logger.info('[Surepass] DigiLocker Aadhaar download response', {
       statusCode: data?.status_code,
       success: data?.success,
       hasData: Boolean(data?.data),
+      dataKeys: data?.data ? Object.keys(data.data) : [],
     });
 
-    const aadhaarData = data?.data;
-    if (!aadhaarData || !data?.success) {
+    if (!data?.success || !data?.data) {
       throw new AppError(
-        data?.message || 'Failed to fetch Aadhaar data from DigiLocker',
+        data?.message || 'Failed to download Aadhaar data from DigiLocker',
         400
       );
     }
 
-    // Parse address — may be string or structured object
+    // Aadhaar data can be in data.aadhaar_xml_data or data directly
+    const aadhaarData = data.data.aadhaar_xml_data || data.data;
+    const metadata = data.data.digilocker_metadata || {};
+
+    // Parse address — structured object from Aadhaar XML
     const address = aadhaarData?.address
       ? (typeof aadhaarData.address === 'object'
         ? [
@@ -302,30 +201,31 @@ export const digilockerFetchAadhaar = async (
             aadhaarData.address?.vtc,
             aadhaarData.address?.subdist,
             aadhaarData.address?.dist,
+            aadhaarData.address?.po,
             aadhaarData.address?.state,
-            aadhaarData.address?.pc,
+            aadhaarData.address?.country,
           ].filter(Boolean).join(', ')
         : String(aadhaarData.address))
-      : '';
+      : (aadhaarData?.full_address || '');
 
     return {
       verified: true,
-      fullName: String(aadhaarData?.full_name || aadhaarData?.name || ''),
-      dob: String(aadhaarData?.dob || aadhaarData?.date_of_birth || ''),
-      gender: String(aadhaarData?.gender || ''),
+      fullName: String(aadhaarData?.full_name || metadata?.name || ''),
+      dob: String(aadhaarData?.dob || metadata?.dob || ''),
+      gender: String(aadhaarData?.gender || metadata?.gender || ''),
       address,
-      photo: String(aadhaarData?.profile_image || aadhaarData?.photo_link || aadhaarData?.photo || ''),
-      aadhaarNumber: String(aadhaarData?.aadhaar_number || aadhaarData?.id_number || ''),
+      photo: String(aadhaarData?.profile_image || ''),
+      aadhaarNumber: String(aadhaarData?.masked_aadhaar || ''),
       rawResponse: data,
     };
   } catch (error: any) {
     if (error instanceof AppError) throw error;
-    logger.error('[Surepass] DigiLocker Aadhaar fetch failed', {
+    logger.error('[Surepass] DigiLocker Aadhaar download failed', {
       status: error?.response?.status,
       data: error?.response?.data,
       message: error?.message,
     });
-    const msg = error?.response?.data?.message || error?.message || 'Failed to fetch Aadhaar from DigiLocker';
+    const msg = error?.response?.data?.message || error?.message || 'Failed to download Aadhaar from DigiLocker';
     throw new AppError(msg, error?.response?.status || 502);
   }
 };
