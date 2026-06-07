@@ -100,7 +100,7 @@ export class BookingController {
     });
   });
 
-  static createBooking = asyncHandler(async (req: AuthRequest, res: Response) => {
+  static createBooking = asyncHandler(async (req: AuthRequest, res: Response): Promise<any> => {
     if (!req.user) {
       throw new AppError('Not authenticated', 401);
     }
@@ -116,6 +116,73 @@ export class BookingController {
     const { error, value } = createBookingSchema.validate(req.body);
     if (error) {
       throw new AppError(error.details[0].message, 400);
+    }
+
+    // Prevent duplicate bookings: if customer already has an active booking, return it
+    // But auto-cancel stale SEARCHING/REQUESTED bookings older than 10 minutes
+    const STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000; // 6 hours
+    const staleDate = new Date(Date.now() - STALE_THRESHOLD_MS);
+
+    // Auto-cancel any stale SEARCHING/REQUESTED bookings
+    await prisma.booking.updateMany({
+      where: {
+        customerId: req.user.id,
+        status: { in: [BookingStatus.REQUESTED, BookingStatus.SEARCHING] },
+        createdAt: { lt: staleDate },
+      },
+      data: {
+        status: BookingStatus.CANCELLED,
+        cancelledAt: new Date(),
+        cancelledBy: CancelledBy.CUSTOMER,
+        cancellationReason: 'Auto-cancelled: no driver found within 6 hours',
+      } as any,
+    });
+
+    // Now check for any remaining active booking
+    const existingActive = await prisma.booking.findFirst({
+      where: {
+        customerId: req.user.id,
+        status: {
+          in: [
+            BookingStatus.REQUESTED,
+            BookingStatus.SEARCHING,
+            BookingStatus.ACCEPTED,
+            BookingStatus.DRIVER_ARRIVING,
+            BookingStatus.ARRIVED,
+            BookingStatus.STARTED,
+            BookingStatus.IN_PROGRESS,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existingActive) {
+      return res.status(200).json({
+        success: true,
+        message: 'Active booking exists',
+        data: {
+          id: existingActive.id,
+          bookingNumber: existingActive.bookingNumber,
+          status: existingActive.status,
+          customerId: existingActive.customerId,
+          pickupAddress: existingActive.pickupAddress,
+          dropAddress: existingActive.dropAddress,
+          pickupLocationLat: existingActive.pickupLocationLat,
+          pickupLocationLng: existingActive.pickupLocationLng,
+          dropLocationLat: existingActive.dropLocationLat,
+          dropLocationLng: existingActive.dropLocationLng,
+          vehicleType: existingActive.vehicleType,
+          transmissionType: existingActive.transmissionType,
+          tripType: existingActive.tripType,
+          totalAmount: existingActive.totalAmount,
+          paymentMethod: existingActive.paymentMethod,
+          paymentStatus: existingActive.paymentStatus,
+          scheduledTime: existingActive.scheduledTime,
+          createdAt: existingActive.createdAt,
+          updatedAt: existingActive.updatedAt,
+        },
+      });
     }
 
     const booking = await BookingService.createBooking({

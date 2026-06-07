@@ -80,6 +80,27 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
   <meta property="og:url" content="${baseUrl}/track/${shareToken}">
   <meta property="og:site_name" content="Drively">
 
+  <!-- Smart deep link: try to open app, fall back to web page -->
+  <script>
+    (function() {
+      var deepLink = 'drively://track/${shareToken}';
+      var isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      if (isMobile) {
+        // Try to open app
+        var appOpened = false;
+        var t = setTimeout(function() {
+          if (!appOpened) {
+            // App not installed or failed — stay on web page
+            document.getElementById('webFallback') && (document.getElementById('webFallback').style.display = 'block');
+          }
+        }, 1500);
+        // Listen for blur = app opened successfully
+        window.addEventListener('blur', function() { appOpened = true; clearTimeout(t); });
+        window.location.href = deepLink;
+      }
+    })();
+  </script>
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 

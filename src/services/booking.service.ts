@@ -218,6 +218,24 @@ export class BookingService {
 
     const now = new Date();
     const since = maxAgeMinutes > 0 ? new Date(Date.now() - maxAgeMinutes * 60 * 1000) : null;
+
+    // Auto-cancel stale SEARCHING/REQUESTED bookings (>6 hours old, no driver assigned)
+    const staleDate = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    await prisma.booking.updateMany({
+      where: {
+        driverId: null,
+        status: { in: [BookingStatus.REQUESTED, BookingStatus.SEARCHING] },
+        scheduledTime: null, // Don't cancel scheduled bookings
+        createdAt: { lt: staleDate },
+      },
+      data: {
+        status: BookingStatus.CANCELLED,
+        cancelledAt: new Date(),
+        cancelledBy: CancelledBy.CUSTOMER,
+        cancellationReason: 'Auto-cancelled: no driver found within 6 hours',
+      } as any,
+    });
+
     const bookings = await prisma.booking.findMany({
       where: {
         driverId: null,
