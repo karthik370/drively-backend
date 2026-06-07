@@ -39,7 +39,20 @@ export const sendExpoPushNotification = async (params: {
   if (!title || !body) return;
 
   const tokens = await listExpoTokensForUsers(params.userIds || []);
-  if (tokens.length === 0) return;
+  if (tokens.length === 0) {
+    logger.warn('[Push] No Expo push tokens found for users — notification will NOT be delivered', {
+      userIds: params.userIds,
+      title,
+    });
+    return;
+  }
+
+  logger.info('[Push] Sending push notification', {
+    userIds: params.userIds,
+    tokenCount: tokens.length,
+    title,
+    body: body.substring(0, 80),
+  });
 
   const messages = tokens.map((to) => ({
     to,
@@ -62,8 +75,12 @@ export const sendExpoPushNotification = async (params: {
       const data = res?.data;
       if (data?.data && Array.isArray(data.data)) {
         const bad = data.data.filter((t: any) => t?.status === 'error');
+        const ok = data.data.filter((t: any) => t?.status === 'ok');
         if (bad.length) {
-          logger.warn('Expo push send had errors', { errors: bad.slice(0, 5) });
+          logger.warn('[Push] Expo push send had errors', { errors: bad.slice(0, 5), userIds: params.userIds });
+        }
+        if (ok.length) {
+          logger.info('[Push] Expo push delivered successfully', { delivered: ok.length, title });
         }
       }
     }

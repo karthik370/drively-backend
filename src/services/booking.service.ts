@@ -1829,8 +1829,8 @@ export class BookingService {
       } as any,
     });
 
-    // Driver refund rule: if customer cancels after driver has traveled >= 5km (from ACCEPTED onward)
-    // create a refund instruction for admin to pay driver ₹30.
+    // Driver compensation rule: if customer cancels after driver has traveled >= 5km
+    // auto-credit ₹30 to driver's wallet
     try {
       const shouldConsiderRefund =
         params.cancelledBy === CancelledBy.CUSTOMER &&
@@ -1847,113 +1847,57 @@ export class BookingService {
         const travelKm = booking.driverTravelDistanceKm ? Number(booking.driverTravelDistanceKm) : 0;
         if (Number.isFinite(travelKm) && travelKm >= 5) {
           const driverId = String(booking.driverId);
-          const driverProfile = await prisma.driverProfile.findUnique({
+          const compensationAmount = 30;
+
+          // Credit driver wallet directly
+          await prisma.driverProfile.update({
             where: { userId: driverId },
-            include: {
-              user: { select: { firstName: true, lastName: true, phoneNumber: true } },
+            data: {
+              pendingEarnings: { increment: compensationAmount },
+              totalEarnings: { increment: compensationAmount },
+            } as any,
+          });
+
+          const io = getSocketServer();
+
+          // Store notification for driver
+          await prisma.notification.create({
+            data: {
+              userId: driverId,
+              type: 'SYSTEM' as any,
+              title: 'Cancellation Compensation',
+              body: `₹${compensationAmount} credited to your wallet — customer cancelled after you traveled ${travelKm.toFixed(1)} km`,
+              data: {
+                kind: 'driver_cancellation_credit',
+                bookingId: booking.id,
+                amount: compensationAmount,
+                travelKm,
+              } as any,
             },
           });
 
-          const upiId = typeof driverProfile?.upiId === 'string' ? driverProfile.upiId.trim() : '';
-          if (upiId) {
-            const refund = await (prisma as any).driverRefund.upsert({
-              where: { bookingId: booking.id },
-              create: {
-                bookingId: booking.id,
-                driverId,
-                upiId,
-                amount: 30 as any,
-                status: 'PENDING' as any,
-              } as any,
-              update: {} as any,
-              select: { id: true, amount: true },
-            });
+          // Real-time socket notification
+          io.to(`user:${driverId}`).emit('wallet:updated', {
+            bookingId: booking.id,
+            amount: compensationAmount,
+            reason: 'cancellation_compensation',
+            message: `₹${compensationAmount} credited — customer cancelled after ${travelKm.toFixed(1)} km travel`,
+          });
 
-            const io = getSocketServer();
+          // Push notification to driver
+          await sendExpoPushNotification({
+            userIds: [driverId],
+            title: '💰 ₹30 Credited to Wallet',
+            body: `Customer cancelled after you traveled ${travelKm.toFixed(1)} km. ₹${compensationAmount} has been added to your wallet.`,
+            data: { kind: 'driver_cancellation_credit', bookingId: String(booking.id), amount: String(compensationAmount) },
+          });
 
-            // Notify driver
-            await prisma.notification.create({
-              data: {
-                userId: driverId,
-                type: 'SYSTEM' as any,
-                title: 'Refund',
-                body: 'You will be refunded with ₹30',
-                data: {
-                  kind: 'driver_refund_created',
-                  bookingId: booking.id,
-                  refundId: refund.id,
-                  amount: Number(refund.amount),
-                } as any,
-              },
-            });
-            io.to(`user:${driverId}`).emit('driver:refund-created', {
-              bookingId: booking.id,
-              refundId: refund.id,
-              amount: Number(refund.amount),
-              message: 'You will be refunded with ₹30',
-            });
-
-            // Notify admins
-            const raw = String(
-              process.env.ADMIN_PHONE_NUMBERS ||
-              process.env.ADMIN_PHONES ||
-              process.env.ADMIN_PHONE ||
-              process.env.ADMIN_ALLOWLIST ||
-              ''
-            ).trim();
-            const allowedDigits = raw
-              .split(/[\s,;]+/g)
-              .map((v) => v.trim())
-              .filter(Boolean)
-              .map((v) => v.replace(/\D/g, ''))
-              .map((d) => (d.length > 10 ? d.slice(-10) : d))
-              .filter(Boolean);
-
-            if (allowedDigits.length) {
-              const adminUsers = await prisma.user.findMany({
-                where: {
-                  OR: allowedDigits.map((digits) => ({
-                    phoneNumber: {
-                      endsWith: digits,
-                    },
-                  })),
-                },
-                select: { id: true },
-              });
-
-              const adminIds = adminUsers.map((u) => String(u.id)).filter(Boolean);
-              if (adminIds.length) {
-                await prisma.notification.createMany({
-                  data: adminIds.map((adminId) => ({
-                    userId: adminId,
-                    type: 'SYSTEM' as any,
-                    title: 'Driver refund required',
-                    body: `Pay ₹30 to driver (${driverProfile?.user?.firstName ?? ''} ${driverProfile?.user?.lastName ?? ''}) UPI: ${upiId}`.trim(),
-                    data: {
-                      kind: 'driver_refund_admin',
-                      bookingId: booking.id,
-                      bookingNumber: booking.bookingNumber,
-                      refundId: refund.id,
-                      driverId,
-                      driverPhoneNumber: driverProfile?.user?.phoneNumber,
-                      upiId,
-                      amount: Number(refund.amount),
-                    } as any,
-                  })),
-                });
-
-                for (const adminId of adminIds) {
-                  io.to(`user:${adminId}`).emit('admin:refund-created', {
-                    bookingId: booking.id,
-                    refundId: refund.id,
-                    driverId,
-                    upiId,
-                    amount: Number(refund.amount),
-                  });
-                }
-              }
-            }
-          }
+          logger.info('Driver cancellation compensation credited', {
+            driverId,
+            bookingId: booking.id,
+            amount: compensationAmount,
+            travelKm,
+          });
         }
       }
     } catch {
