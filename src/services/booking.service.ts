@@ -1265,6 +1265,16 @@ export class BookingService {
           },
         });
       }
+
+      if (next === BookingStatus.STARTED) {
+        await sendPushWithRetry({
+          userIds: [String(booking.customerId)],
+          title: '🚀 Trip started!',
+          body: 'Your trip has begun. Enjoy your ride!',
+          data: { kind: 'booking_status', bookingId: String(params.bookingId), status: 'STARTED' },
+        });
+      }
+
     } catch (notifErr) {
       logger.warn('Failed to send status push notification after retries', { error: notifErr, bookingId: params.bookingId, status: params.status });
     }
@@ -1623,6 +1633,35 @@ export class BookingService {
       });
     }
 
+    // Push notification for trip completion (placed here so completedBooking is available)
+    if (params.status === BookingStatus.COMPLETED) {
+      try {
+        const finalBookingPush = completedBooking || booking;
+        const fare = Number((finalBookingPush as any).totalAmount || 0);
+        const fareText = fare > 0 ? ` Total fare: ₹${fare.toFixed(0)}` : '';
+        // Notify customer
+        await sendPushWithRetry({
+          userIds: [String(booking.customerId)],
+          title: '✅ Trip completed!',
+          body: `Your trip has been completed.${fareText} Thank you for riding with DriveMate!`,
+          data: { kind: 'booking_status', bookingId: String(params.bookingId), status: 'COMPLETED' },
+        });
+        // Notify driver
+        if (booking.driverId) {
+          const driverEarnings = Number((finalBookingPush as any).driverEarnings || 0);
+          const earningsText = driverEarnings > 0 ? ` Earnings: ₹${driverEarnings.toFixed(0)}` : '';
+          await sendPushWithRetry({
+            userIds: [String(booking.driverId)],
+            title: '✅ Trip completed!',
+            body: `Trip completed successfully.${earningsText}`,
+            data: { kind: 'booking_status', bookingId: String(params.bookingId), status: 'COMPLETED' },
+          });
+        }
+      } catch (completePushErr) {
+        logger.warn('Failed to send completion push notification', { error: completePushErr, bookingId: params.bookingId });
+      }
+    }
+
     return { bookingId: params.bookingId, status: params.status };
   };
 
@@ -1729,6 +1768,16 @@ export class BookingService {
         cancelledBy: CancelledBy.DRIVER,
         reason: params.reason,
       });
+
+      // Push notification to customer: driver cancelled, searching for new driver
+      try {
+        await sendExpoPushNotification({
+          userIds: [String(booking.customerId)],
+          title: '🔄 Finding a new driver',
+          body: 'Your previous driver cancelled. We are searching for another driver for you.',
+          data: { kind: 'booking_driver_cancelled', bookingId: String(params.bookingId) },
+        });
+      } catch {}
 
       io.to('online-drivers').emit('booking:offer', {
         bookingId: params.bookingId,
@@ -1935,6 +1984,25 @@ export class BookingService {
         cancelledBy: params.cancelledBy,
       });
     }
+
+    // Push notification to the other party about cancellation
+    try {
+      if (params.cancelledBy === CancelledBy.CUSTOMER && booking.driverId) {
+        await sendExpoPushNotification({
+          userIds: [String(booking.driverId)],
+          title: '❌ Booking cancelled',
+          body: 'The customer has cancelled the booking.',
+          data: { kind: 'booking_cancelled', bookingId: String(params.bookingId), cancelledBy: 'CUSTOMER' },
+        });
+      } else if (params.cancelledBy === CancelledBy.DRIVER && booking.customerId) {
+        await sendExpoPushNotification({
+          userIds: [String(booking.customerId)],
+          title: '❌ Booking cancelled',
+          body: 'Your driver has cancelled the booking. Please try booking again.',
+          data: { kind: 'booking_cancelled', bookingId: String(params.bookingId), cancelledBy: 'DRIVER' },
+        });
+      }
+    } catch {}
 
     io.to('online-drivers').emit('booking:offer-removed', {
       bookingId: params.bookingId,
