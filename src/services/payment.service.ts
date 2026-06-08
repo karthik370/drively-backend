@@ -5,24 +5,61 @@ import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, gene
 import { getSocketServer } from '../socket/io';
 import { logger } from '../utils/logger';
 
-/** Credit driver's wallet after an online payment is confirmed */
+/** Credit driver's wallet after an online payment is confirmed.
+ *  Idempotent — uses a `driverCredited` flag to prevent double-crediting
+ *  when both verifyPayment() and webhook fire for the same booking. */
 const creditDriverForBooking = async (bookingId: string) => {
   try {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
-      select: { driverId: true, driverEarnings: true, status: true },
+      select: { driverId: true, driverEarnings: true, status: true, paymentStatus: true },
     });
     if (!booking?.driverId) return;
     // Only credit if booking is COMPLETED (trip is done)
     if (booking.status !== 'COMPLETED') return;
+    // Only credit if payment is actually confirmed
+    if (booking.paymentStatus !== 'PAID') return;
     const earnings = Number(booking.driverEarnings || 0);
     if (earnings <= 0) return;
-    await prisma.driverProfile.update({
-      where: { userId: booking.driverId },
-      data: {
-        totalEarnings: { increment: earnings },
-        pendingEarnings: { increment: earnings },
-      } as any,
+
+    // Use a transaction with idempotency check to prevent double-credit
+    await prisma.$transaction(async (tx) => {
+      // Check if driver was already credited for this booking
+      const paidPayments = await tx.payment.findMany({
+        where: { bookingId, status: 'PAID' },
+        select: { id: true, gatewayResponse: true },
+      });
+
+      const alreadyCredited = paidPayments.some((p) => {
+        const gr = typeof p.gatewayResponse === 'object' && p.gatewayResponse ? (p.gatewayResponse as any) : {};
+        return gr.driverCredited === true;
+      });
+      if (alreadyCredited) return; // Already credited — skip
+
+      await tx.driverProfile.update({
+        where: { userId: booking.driverId! },
+        data: {
+          totalEarnings: { increment: earnings },
+          pendingEarnings: { increment: earnings },
+        } as any,
+      });
+
+      // Mark the latest payment as having credited the driver
+      const latestPayment = paidPayments.length > 0 ? paidPayments[paidPayments.length - 1] : null;
+      if (latestPayment) {
+        const existingGr = typeof latestPayment.gatewayResponse === 'object' && latestPayment.gatewayResponse
+          ? (latestPayment.gatewayResponse as any) : {};
+        await tx.payment.update({
+          where: { id: latestPayment.id },
+          data: {
+            gatewayResponse: {
+              ...existingGr,
+              driverCredited: true,
+              driverCreditedAt: new Date().toISOString(),
+            } as any,
+          },
+        });
+      }
     });
   } catch {
     // Non-critical — don't fail the payment flow

@@ -874,7 +874,7 @@ export class BookingService {
           otp: typeof otp === 'string' ? otp : '',
         },
       });
-    } catch {}
+    } catch { }
 
     return { booking: acceptedBooking };
   };
@@ -1547,21 +1547,16 @@ export class BookingService {
       const finalBooking = completedBooking || booking;
 
       if (finalBooking.driverId) {
-        const earnings = Number((finalBooking as any).driverEarnings || 0);
-        const isCash = (finalBooking as any).paymentMethod === PaymentMethod.CASH;
-
+        // Only mark driver available and increment trip count.
+        // Do NOT credit wallet here — that happens when payment is actually confirmed:
+        //   • verifyPayment() / webhook → creditDriverForBooking() (online payment)
+        //   • collectCash() → no wallet credit (driver has physical cash)
+        //   • payBookingWithWallet() → inline credit (wallet payment)
         await prisma.driverProfile.update({
           where: { userId: finalBooking.driverId },
           data: {
             isAvailable: true,
             totalTrips: { increment: 1 },
-            // Only credit wallet for online payments — CASH is collected directly
-            ...(isCash
-              ? {}
-              : {
-                  totalEarnings: { increment: earnings },
-                  pendingEarnings: { increment: earnings },
-                }),
           } as any,
         });
       }
@@ -1661,7 +1656,7 @@ export class BookingService {
         await sendPushWithRetry({
           userIds: [String(booking.customerId)],
           title: '✅ Trip completed!',
-          body: `Your trip has been completed.${fareText} Thank you for riding with DriveMate!`,
+          body: `Your trip has been completed.${fareText} Thank you for riding with Drively!`,
           data: { kind: 'booking_status', bookingId: String(params.bookingId), status: 'COMPLETED' },
         });
         // Notify driver
@@ -1795,7 +1790,7 @@ export class BookingService {
           body: 'Your previous driver cancelled. We are searching for another driver for you.',
           data: { kind: 'booking_driver_cancelled', bookingId: String(params.bookingId) },
         });
-      } catch {}
+      } catch { }
 
       io.to('online-drivers').emit('booking:offer', {
         bookingId: params.bookingId,
@@ -1964,7 +1959,7 @@ export class BookingService {
           data: { kind: 'booking_cancelled', bookingId: String(params.bookingId), cancelledBy: 'DRIVER' },
         });
       }
-    } catch {}
+    } catch { }
 
     io.to('online-drivers').emit('booking:offer-removed', {
       bookingId: params.bookingId,
