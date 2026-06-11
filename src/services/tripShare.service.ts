@@ -41,8 +41,14 @@ export class TripShareService {
                         driverProfile: {
                             select: {
                                 currentLatitude: true, currentLongitude: true,
-                                vehicleMake: true, vehicleModel: true, vehicleColor: true, licensePlate: true,
-                            } as any,
+                                // Vehicle info is on the Vehicle model via currentVehicle relation
+                                currentVehicle: {
+                                    select: {
+                                        make: true, model: true, color: true,
+                                        registrationNumber: true,
+                                    },
+                                },
+                            },
                         },
                     },
                 },
@@ -51,6 +57,9 @@ export class TripShareService {
         }) as any;
 
         if (!booking) throw new AppError('Tracking link not found or expired', 404);
+
+        const dp = booking.driver?.driverProfile;
+        const vehicle = dp?.currentVehicle;
 
         return {
             bookingNumber: booking.bookingNumber,
@@ -71,15 +80,15 @@ export class TripShareService {
                 firstName: booking.driver.firstName,
                 lastName: booking.driver.lastName,
                 profileImage: booking.driver.profileImage,
-                vehicle: booking.driver.driverProfile ? {
-                    make: booking.driver.driverProfile.vehicleMake,
-                    model: booking.driver.driverProfile.vehicleModel,
-                    color: booking.driver.driverProfile.vehicleColor,
-                    licensePlate: booking.driver.driverProfile.licensePlate,
+                vehicle: vehicle ? {
+                    make: vehicle.make,
+                    model: vehicle.model,
+                    color: vehicle.color,
+                    licensePlate: vehicle.registrationNumber,
                 } : null,
-                currentLocation: booking.driver.driverProfile ? {
-                    latitude: booking.driver.driverProfile.currentLatitude ? Number(booking.driver.driverProfile.currentLatitude) : null,
-                    longitude: booking.driver.driverProfile.currentLongitude ? Number(booking.driver.driverProfile.currentLongitude) : null,
+                currentLocation: dp ? {
+                    latitude: dp.currentLatitude ? Number(dp.currentLatitude) : null,
+                    longitude: dp.currentLongitude ? Number(dp.currentLongitude) : null,
                 } : null,
             } : null,
             vehicleType: booking.vehicleType,

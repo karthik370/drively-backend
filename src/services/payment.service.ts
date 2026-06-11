@@ -1,7 +1,7 @@
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
-import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId } from './cashfree';
+import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId, getUpiQrLink } from './cashfree';
 import { getSocketServer } from '../socket/io';
 import { logger } from '../utils/logger';
 
@@ -155,6 +155,16 @@ export class PaymentService {
       },
     });
 
+    // Try to get a proper UPI QR link (upi://pay?...) for QR scanning.
+    // The paymentSessionId alone is a browser checkout URL — UPI apps can't scan it.
+    let upiQrLink: string | null = null;
+    try {
+      upiQrLink = await getUpiQrLink({ paymentSessionId: cfOrder.paymentSessionId });
+      logger.info('[Payment] Got UPI QR link for booking', { bookingId: booking.id, upiQrLink: upiQrLink?.slice(0, 60) });
+    } catch (e: any) {
+      logger.warn('[Payment] UPI QR link failed, falling back to checkout URL', { error: e?.message });
+    }
+
     return {
       alreadyPaid: false,
       bookingId: booking.id,
@@ -163,6 +173,7 @@ export class PaymentService {
       paymentSessionId: cfOrder.paymentSessionId,
       amount: cfOrder.orderAmount,
       currency: cfOrder.orderCurrency,
+      upiQrLink, // Proper UPI deep link for QR code scanning
     };
   }
 

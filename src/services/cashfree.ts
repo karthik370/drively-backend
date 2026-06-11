@@ -181,6 +181,74 @@ export const verifyCashfreeWebhook = (params: {
   }
 };
 
+// ── Get UPI QR Link via Cashfree Pay API ───────────────────────────────────
+/**
+ * Calls Cashfree's Pay API to initiate a UPI QR code payment.
+ * Returns the actual UPI deep link (`upi://pay?...`) that can be encoded as QR.
+ * This is the correct approach — the checkout session URL cannot be scanned by UPI apps.
+ */
+export const getUpiQrLink = async (params: {
+  paymentSessionId: string;
+}): Promise<string> => {
+  const { appId, secretKey, baseUrl } = getCashfreeConfig();
+
+  try {
+    const response = await axios.post(
+      `${baseUrl}/orders/sessions`,
+      {
+        payment_session_id: params.paymentSessionId,
+        payment_method: {
+          upi: {
+            channel: 'qrcode',
+          },
+        },
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-version': '2023-08-01',
+          'x-client-id': appId,
+          'x-client-secret': secretKey,
+        },
+      },
+    );
+
+    const data = response.data;
+    logger.info('[Cashfree] UPI QR response', {
+      channel: data?.channel,
+      action: data?.action,
+      payment_method: data?.payment_method,
+      hasPayload: !!data?.data?.payload,
+    });
+
+    // Cashfree returns the QR data in data.data.payload.qrcode or data.data.url
+    const qrLink =
+      data?.data?.payload?.qrcode ||   // Direct UPI link
+      data?.data?.payload?.default ||   // Fallback
+      data?.data?.url ||                // Alternative location
+      null;
+
+    if (qrLink) {
+      return String(qrLink);
+    }
+
+    // If we got a cf_payment_id but no QR link, the flow differs —
+    // fall back to the checkout URL
+    logger.warn('[Cashfree] UPI QR: no direct link in response, full data:', {
+      responseData: JSON.stringify(data).slice(0, 500),
+    });
+    throw new Error('Cashfree did not return a UPI QR link');
+  } catch (error: any) {
+    // If the Pay API doesn't support QR for this env/config, log and re-throw
+    logger.error('[Cashfree] UPI QR failed', {
+      message: error?.message,
+      status: error?.response?.status,
+      data: JSON.stringify(error?.response?.data || {}).slice(0, 500),
+    });
+    throw error;
+  }
+};
+
 /**
  * Generate a unique Cashfree-safe order ID.
  * Cashfree requires alphanumeric + `_` + `-` only, max 50 chars.
