@@ -15,7 +15,9 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
   try {
     const trip = await TripShareService.getPublicTracking(shareToken);
     const apiVersion = process.env.API_VERSION || 'v1';
-    const googleMapsKey = process.env.GOOGLE_MAPS_API_KEY || '';
+    // Use a separate web-specific key that has Maps JS API enabled with no referrer restrictions
+    // Falls back to the same key as mobile (which may have restrictions)
+    const googleMapsKey = process.env.GOOGLE_MAPS_WEB_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
     const appScheme = 'drively';
     const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v2.kurnm.click';
 
@@ -51,7 +53,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
       ? `${trip.driver.firstName} ${trip.driver.lastName || ''}`.trim()
       : '';
     const vehicleInfo = trip.driver?.vehicle
-      ? `${trip.driver.vehicle.color || ''} ${trip.driver.vehicle.make || ''} ${trip.driver.vehicle.model || ''}`.trim()
+      ? `${[trip.driver.vehicle.color, trip.driver.vehicle.make, trip.driver.vehicle.model].filter(Boolean).join(' ')}`.trim()
       : '';
     const licensePlate = trip.driver?.vehicle?.licensePlate || '';
     const driverLat = trip.driver?.currentLocation?.latitude;
@@ -61,9 +63,43 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     const dropLat = trip.drop?.latitude;
     const dropLng = trip.drop?.longitude;
 
+    // Compute live ETA from driver's current GPS position to pickup
+    // Uses straight-line distance × 1.4 (road factor) ÷ 30 km/h avg city speed
+    let liveETA: number | null = null;
+    if (driverLat && driverLng && pickupLat && pickupLng) {
+      const R = 6371; // Earth radius km
+      const dLat = (pickupLat - driverLat) * Math.PI / 180;
+      const dLon = (pickupLng - driverLng) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+        Math.cos(driverLat * Math.PI / 180) * Math.cos(pickupLat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+      const distanceKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const roadDistanceKm = distanceKm * 1.4; // road factor
+      const avgSpeedKmH = 25; // city speed
+      liveETA = Math.max(1, Math.round((roadDistanceKm / avgSpeedKmH) * 60));
+    } else if (trip.driverETA) {
+      liveETA = Number(trip.driverETA);
+    }
+
+    // Show ETA only for pre-trip statuses — not during IN_PROGRESS/COMPLETED
+    const showETA = liveETA && liveETA > 0 && !['COMPLETED', 'CANCELLED', 'STARTED', 'IN_PROGRESS'].includes(trip.status);
+
     const ogDescription = driverName
       ? `${trip.customerName}'s ride with ${driverName} — track live on Drively`
       : `Track ${trip.customerName}'s ride live on Drively`;
+
+    // Build static map URL as guaranteed fallback (works without JS)
+    const staticMapCenter = driverLat && driverLng
+      ? `${driverLat},${driverLng}`
+      : pickupLat && pickupLng ? `${pickupLat},${pickupLng}` : '17.385,78.4867';
+    const staticMapMarkers = [
+      pickupLat && pickupLng ? `color:green|${pickupLat},${pickupLng}` : '',
+      dropLat && dropLng ? `color:red|${dropLat},${dropLng}` : '',
+      driverLat && driverLng ? `color:0xC9A84C|label:D|${driverLat},${driverLng}` : '',
+    ].filter(Boolean).map(m => `&markers=${encodeURIComponent(m)}`).join('');
+    const staticMapUrl = googleMapsKey
+      ? `https://maps.googleapis.com/maps/api/staticmap?size=600x300&scale=2&maptype=roadmap&style=element:geometry|color:0x1d1d1d&style=element:labels.text.fill|color:0x757575${staticMapMarkers}&key=${googleMapsKey}`
+      : '';
+
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -412,8 +448,14 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     <a class="open-app" href="${appScheme}://track/${shareToken}" id="openAppBtn">Open in App</a>
   </div>
 
-  <!-- Map -->
-  <div id="map"></div>
+  <!-- Map: Static image loads immediately, JS interactive map replaces it if key works -->
+  <div id="mapWrap" style="position:relative;width:100%;height:45vh;min-height:280px;background:#111;overflow:hidden;">
+    ${staticMapUrl
+      ? `<img id="staticMap" src="${staticMapUrl}" style="width:100%;height:100%;object-fit:cover;display:block;" alt="Map" onerror="this.style.display='none'">`
+      : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px;">🗺️ Map loading…</div>`
+    }
+    <div id="map" style="position:absolute;inset:0;"></div>
+  </div>
 
   <!-- Status Banner -->
   <div class="status-banner ${isActive ? 'active' : ''}" id="statusBanner">
@@ -421,7 +463,10 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
       <div class="status-dot"></div>
       <span id="statusText">${statusLabel}</span>
     </div>
-    ${trip.driverETA ? `<div class="eta-badge" id="etaBadge">${trip.driverETA}<small>MIN</small></div>` : '<div class="eta-badge" id="etaBadge" style="display:none"></div>'}
+    ${showETA
+      ? `<div class="eta-badge" id="etaBadge">${liveETA}<small>MIN</small></div>`
+      : `<div class="eta-badge" id="etaBadge" style="display:none"></div>`
+    }
   </div>
 
   <!-- Content -->
@@ -429,7 +474,12 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     ${trip.driver ? `
     <div class="driver-card" id="driverCard">
       <div class="driver-avatar" id="driverAvatar">
-        ${trip.driver.profileImage ? `<img src="${trip.driver.profileImage}" alt="${driverName}">` : driverName.charAt(0).toUpperCase()}
+        ${trip.driver.profileImage
+          ? `<img src="${trip.driver.profileImage}" alt="${driverName}"
+               onerror="this.style.display='none';this.parentNode.innerText='${driverName.charAt(0).toUpperCase()}'"
+             >`
+          : driverName.charAt(0).toUpperCase()
+        }
       </div>
       <div class="driver-details">
         <div class="driver-name" id="driverName">${driverName}</div>
@@ -662,11 +712,21 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
             statusBanner && statusBanner.classList.add('active');
           }
 
-          // Update ETA
+          // Update ETA — compute live from driver GPS to pickup, not from DB value
           const etaBadge = document.getElementById('etaBadge');
           if (etaBadge) {
-            if (d.driverETA && d.driverETA > 0 && !['COMPLETED', 'CANCELLED'].includes(d.status)) {
-              etaBadge.innerHTML = d.driverETA + '<small>MIN</small>';
+            const dLat = d.driver?.currentLocation?.latitude;
+            const dLng = d.driver?.currentLocation?.longitude;
+            const hideETA = ['COMPLETED', 'CANCELLED', 'STARTED', 'IN_PROGRESS'].includes(d.status);
+            if (!hideETA && dLat && dLng && currentData.pickupLat && currentData.pickupLng) {
+              // Haversine straight-line distance → road estimate ÷ city speed
+              const R = 6371;
+              const dLt = (currentData.pickupLat - dLat) * Math.PI / 180;
+              const dLn = (currentData.pickupLng - dLng) * Math.PI / 180;
+              const a = Math.sin(dLt/2)**2 + Math.cos(dLat*Math.PI/180)*Math.cos(currentData.pickupLat*Math.PI/180)*Math.sin(dLn/2)**2;
+              const km = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)) * 1.4;
+              const eta = Math.max(1, Math.round((km / 25) * 60));
+              etaBadge.innerHTML = eta + '<small>MIN</small>';
               etaBadge.style.display = '';
             } else {
               etaBadge.style.display = 'none';
