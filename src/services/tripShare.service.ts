@@ -75,6 +75,7 @@ export class TripShareService {
                 longitude: booking.dropLocationLng ? Number(booking.dropLocationLng) : null,
             },
             driverETA: booking.driverETA ?? booking.currentETA ?? null,
+            currentETA: booking.currentETA ?? null,  // Live Google Maps ETA updated every 8s
             customerName: booking.customer?.firstName || 'Customer',
             driver: booking.driver ? {
                 firstName: booking.driver.firstName,

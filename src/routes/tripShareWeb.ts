@@ -63,25 +63,18 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     const dropLat = trip.drop?.latitude;
     const dropLng = trip.drop?.longitude;
 
-    // Compute live ETA from driver's current GPS position to pickup
-    // Uses straight-line distance × 1.4 (road factor) ÷ 30 km/h avg city speed
-    let liveETA: number | null = null;
-    if (driverLat && driverLng && pickupLat && pickupLng) {
-      const R = 6371; // Earth radius km
-      const dLat = (pickupLat - driverLat) * Math.PI / 180;
-      const dLon = (pickupLng - driverLng) * Math.PI / 180;
-      const a = Math.sin(dLat / 2) ** 2 +
-        Math.cos(driverLat * Math.PI / 180) * Math.cos(pickupLat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-      const distanceKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      const roadDistanceKm = distanceKm * 1.4; // road factor
-      const avgSpeedKmH = 25; // city speed
-      liveETA = Math.max(1, Math.round((roadDistanceKm / avgSpeedKmH) * 60));
-    } else if (trip.driverETA) {
-      liveETA = Number(trip.driverETA);
-    }
+    // Use currentETA from DB — this is updated live every 8s by Google Maps API
+    // via locationHandlers.ts calculateETA() — same value shown to customer and driver in the app.
+    // Falls back to driverETA (booking creation estimate) if currentETA is not set.
+    const liveETA = trip.currentETA
+      ? Number(trip.currentETA)
+      : trip.driverETA
+        ? Number(trip.driverETA)
+        : null;
 
     // Show ETA only for pre-trip statuses — not during IN_PROGRESS/COMPLETED
     const showETA = liveETA && liveETA > 0 && !['COMPLETED', 'CANCELLED', 'STARTED', 'IN_PROGRESS'].includes(trip.status);
+
 
     const ogDescription = driverName
       ? `${trip.customerName}'s ride with ${driverName} — track live on Drively`
@@ -712,21 +705,14 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
             statusBanner && statusBanner.classList.add('active');
           }
 
-          // Update ETA — compute live from driver GPS to pickup, not from DB value
+          // Update ETA — use currentETA from DB (Google Maps API, same as shown in app).
+          // Falls back to driverETA if not yet populated.
           const etaBadge = document.getElementById('etaBadge');
           if (etaBadge) {
-            const dLat = d.driver?.currentLocation?.latitude;
-            const dLng = d.driver?.currentLocation?.longitude;
             const hideETA = ['COMPLETED', 'CANCELLED', 'STARTED', 'IN_PROGRESS'].includes(d.status);
-            if (!hideETA && dLat && dLng && currentData.pickupLat && currentData.pickupLng) {
-              // Haversine straight-line distance → road estimate ÷ city speed
-              const R = 6371;
-              const dLt = (currentData.pickupLat - dLat) * Math.PI / 180;
-              const dLn = (currentData.pickupLng - dLng) * Math.PI / 180;
-              const a = Math.sin(dLt/2)**2 + Math.cos(dLat*Math.PI/180)*Math.cos(currentData.pickupLat*Math.PI/180)*Math.sin(dLn/2)**2;
-              const km = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)) * 1.4;
-              const eta = Math.max(1, Math.round((km / 25) * 60));
-              etaBadge.innerHTML = eta + '<small>MIN</small>';
+            const eta = d.currentETA ?? d.driverETA ?? null;
+            if (!hideETA && eta && eta > 0) {
+              etaBadge.innerHTML = Math.round(eta) + '<small>MIN</small>';
               etaBadge.style.display = '';
             } else {
               etaBadge.style.display = 'none';
