@@ -81,9 +81,6 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
       : `Track ${trip.customerName}'s ride live on Drively`;
 
     // Build static map URL as guaranteed fallback (works without JS)
-    const staticMapCenter = driverLat && driverLng
-      ? `${driverLat},${driverLng}`
-      : pickupLat && pickupLng ? `${pickupLat},${pickupLng}` : '17.385,78.4867';
     const staticMapMarkers = [
       pickupLat && pickupLng ? `color:green|${pickupLat},${pickupLng}` : '',
       dropLat && dropLng ? `color:red|${dropLat},${dropLng}` : '',
