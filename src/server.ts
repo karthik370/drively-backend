@@ -77,6 +77,22 @@ if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
   });
 }
 
+// Relaxed helmet for the public trip share tracking page (/track/:token)
+// This page needs: Google Maps JS API, static maps, Cloudinary images, inline scripts, Google Fonts
+app.use('/track', helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://maps.googleapis.com"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      imgSrc: ["'self'", "data:", "https://maps.googleapis.com", "https://maps.gstatic.com", "https://res.cloudinary.com", "https://khms0.googleapis.com", "https://khms1.googleapis.com", "https://khms0.google.com", "https://khms1.google.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      connectSrc: ["'self'", "https://maps.googleapis.com", "https://v2.kurnm.click"],
+      frameSrc: ["'none'"],
+    },
+  },
+}));
+// Default strict helmet for all other routes
 app.use(helmet());
 app.use(cors({
   origin: process.env.FRONTEND_URL || '*',
