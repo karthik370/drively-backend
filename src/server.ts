@@ -77,23 +77,15 @@ if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
   });
 }
 
-// Relaxed helmet for the public trip share tracking page (/track/:token)
-// This page needs: Google Maps JS API, static maps, Cloudinary images, inline scripts, Google Fonts
-app.use('/track', helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://maps.googleapis.com"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      imgSrc: ["'self'", "data:", "https://maps.googleapis.com", "https://maps.gstatic.com", "https://res.cloudinary.com", "https://khms0.googleapis.com", "https://khms1.googleapis.com", "https://khms0.google.com", "https://khms1.google.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
-      connectSrc: ["'self'", "https://maps.googleapis.com", "https://v2.kurnm.click"],
-      frameSrc: ["'none'"],
-    },
-  },
-}));
-// Default strict helmet for all other routes
-app.use(helmet());
+// Global security headers — CSP is disabled for /track share pages
+// (the tripShareWeb route sets its own permissive CSP header directly)
+app.use((req, res, next) => {
+  if (req.path.startsWith('/track/') || req.path === '/track') {
+    // Skip CSP for share pages — tripShareWeb.ts sets its own header
+    return helmet({ contentSecurityPolicy: false })(req, res, next);
+  }
+  return helmet()(req, res, next);
+});
 app.use(cors({
   origin: process.env.FRONTEND_URL || '*',
   credentials: true,

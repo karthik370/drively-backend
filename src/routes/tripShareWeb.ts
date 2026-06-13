@@ -821,6 +821,16 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    // Permissive CSP for this public share page — needs Google Maps, Cloudinary, inline scripts
+    res.setHeader('Content-Security-Policy',
+      "default-src 'self'; " +
+      "script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com https://fonts.googleapis.com; " +
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; " +
+      "img-src 'self' data: blob: https://maps.googleapis.com https://maps.gstatic.com https://res.cloudinary.com https://khms0.googleapis.com https://khms1.googleapis.com https://khms0.google.com https://khms1.google.com https://cbks0.googleapis.com https://cbks1.googleapis.com; " +
+      "font-src 'self' https://fonts.gstatic.com; " +
+      "connect-src 'self' https://maps.googleapis.com https://v2.kurnm.click; " +
+      "frame-src 'none';"
+    );
     res.send(html);
   } catch (error: any) {
     logger.warn('Trip share web page error', { shareToken, error: error?.message });
