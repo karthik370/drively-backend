@@ -2003,24 +2003,6 @@ export class BookingService {
             profileImage: true,
             createdAt: true,
             totalRatings: true,
-            driverBadges: {
-              where: { badge: { isActive: true } },
-              orderBy: { earnedAt: 'desc' },
-              take: 3,
-              select: {
-                earnedAt: true,
-                quizScore: true,
-                badge: {
-                  select: {
-                    id: true,
-                    title: true,
-                    icon: true,
-                    color: true,
-                    category: true,
-                  },
-                },
-              },
-            },
             driverProfile: {
               select: {
                 totalTrips: true,
@@ -2043,6 +2025,36 @@ export class BookingService {
       (booking as any).otp = null;
     }
 
+    // Fetch driver's earned quiz badges separately (DriverBadge.driverId has no Prisma relation to User)
+    if ((booking as any).driver?.id) {
+      try {
+        const driverBadges = await prisma.driverBadge.findMany({
+          where: {
+            driverId: (booking as any).driver.id,
+            badge: { isActive: true },
+          },
+          orderBy: { earnedAt: 'desc' },
+          take: 3,
+          select: {
+            earnedAt: true,
+            quizScore: true,
+            badge: {
+              select: {
+                id: true,
+                title: true,
+                icon: true,
+                color: true,
+                category: true,
+              },
+            },
+          },
+        });
+        (booking as any).driver.driverBadges = driverBadges;
+      } catch {
+        (booking as any).driver.driverBadges = [];
+      }
+    }
+
     (booking as any).customerRating = (booking as any).customerRating ?? null;
     (booking as any).customerReview = (booking as any).customerReview ?? null;
     (booking as any).driverRating = (booking as any).driverRating ?? null;
@@ -2051,5 +2063,6 @@ export class BookingService {
     return booking;
   };
 }
+
 
 export default BookingService;
