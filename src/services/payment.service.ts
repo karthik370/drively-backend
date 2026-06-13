@@ -158,11 +158,35 @@ export class PaymentService {
     // Try to get a proper UPI QR link (upi://pay?...) for QR scanning.
     // The paymentSessionId alone is a browser checkout URL — UPI apps can't scan it.
     let upiQrLink: string | null = null;
+    let driverUpiId: string | null = null;
     try {
       upiQrLink = await getUpiQrLink({ paymentSessionId: cfOrder.paymentSessionId });
-      logger.info('[Payment] Got UPI QR link for booking', { bookingId: booking.id, upiQrLink: upiQrLink?.slice(0, 60) });
+      logger.info('[Payment] Got UPI QR link from Cashfree', { bookingId: booking.id });
     } catch (e: any) {
-      logger.warn('[Payment] UPI QR link failed, falling back to checkout URL', { error: e?.message });
+      logger.warn('[Payment] Cashfree UPI QR failed, trying driver UPI fallback', { error: e?.message });
+    }
+
+    // Fallback: If Cashfree QR fails, use driver's direct UPI ID to generate a upi://pay link.
+    // This is a standard UPI deep link that any UPI app can scan — no Cashfree needed.
+    if (!upiQrLink && booking.driverId) {
+      try {
+        const driverProfile = await prisma.driverProfile.findUnique({
+          where: { userId: booking.driverId },
+          select: { upiId: true, user: { select: { firstName: true, lastName: true } } },
+        });
+        if (driverProfile?.upiId) {
+          driverUpiId = driverProfile.upiId;
+          const driverName = encodeURIComponent(
+            [driverProfile.user?.firstName, driverProfile.user?.lastName].filter(Boolean).join(' ') || 'Drively Driver'
+          );
+          const amountStr = Number(booking.totalAmount).toFixed(2);
+          const txnNote = encodeURIComponent(`Drively Ride ${booking.id.slice(-6).toUpperCase()}`);
+          upiQrLink = `upi://pay?pa=${encodeURIComponent(driverUpiId)}&pn=${driverName}&am=${amountStr}&cu=INR&tn=${txnNote}`;
+          logger.info('[Payment] Using driver UPI fallback link', { bookingId: booking.id, upiId: driverUpiId });
+        }
+      } catch (e2: any) {
+        logger.warn('[Payment] Driver UPI fallback also failed', { error: e2?.message });
+      }
     }
 
     return {
@@ -173,7 +197,8 @@ export class PaymentService {
       paymentSessionId: cfOrder.paymentSessionId,
       amount: cfOrder.orderAmount,
       currency: cfOrder.orderCurrency,
-      upiQrLink, // Proper UPI deep link for QR code scanning
+      upiQrLink,   // UPI deep link for QR scanning (Cashfree or driver's direct UPI)
+      driverUpiId, // Driver's raw UPI ID (shown as text fallback in modal)
     };
   }
 

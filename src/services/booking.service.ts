@@ -2001,6 +2001,23 @@ export class BookingService {
             phoneNumber: true,
             rating: true,
             profileImage: true,
+            createdAt: true,
+            totalRatings: true,
+            driverProfile: {
+              select: {
+                totalTrips: true,
+                currentVehicle: {
+                  select: {
+                    make: true,
+                    model: true,
+                    registrationNumber: true,
+                    vehicleType: true,
+                    color: true,
+                    year: true,
+                  },
+                },
+              },
+            },
           },
         },
       },
