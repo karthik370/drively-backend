@@ -38,3 +38,8 @@ Thumbs.db
 *.ntvs*
 *.njsproj
 *.sln
+
+# Database backups (contain real user data — NEVER commit)
+*.dump
+*.sql
+!prisma/**/*.sql

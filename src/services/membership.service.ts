@@ -200,7 +200,7 @@ export class MembershipService {
           type: MembershipType.BASIC,
           title: 'Basic',
           description: 'Get ₹30 off on every ride you book. Save more the more you ride!',
-          price: new Prisma.Decimal(1),
+          price: new Prisma.Decimal(199),
           durationDays: 30,
           isActive: true,
         },
