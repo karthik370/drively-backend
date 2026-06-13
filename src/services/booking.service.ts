@@ -2003,19 +2003,27 @@ export class BookingService {
             profileImage: true,
             createdAt: true,
             totalRatings: true,
+            driverBadges: {
+              where: { badge: { isActive: true } },
+              orderBy: { earnedAt: 'desc' },
+              take: 3,
+              select: {
+                earnedAt: true,
+                quizScore: true,
+                badge: {
+                  select: {
+                    id: true,
+                    title: true,
+                    icon: true,
+                    color: true,
+                    category: true,
+                  },
+                },
+              },
+            },
             driverProfile: {
               select: {
                 totalTrips: true,
-                currentVehicle: {
-                  select: {
-                    make: true,
-                    model: true,
-                    registrationNumber: true,
-                    vehicleType: true,
-                    color: true,
-                    year: true,
-                  },
-                },
               },
             },
           },
