@@ -324,6 +324,30 @@ export class DriverWalletService {
     }
 
     /**
+     * Save / update driver's UPI ID for QR code payments.
+     * Creates a driver_profiles row if none exists (some drivers skip onboarding steps).
+     */
+    static async saveUpiId(userId: string, upiId: string) {
+        await prisma.driverProfile.upsert({
+            where: { userId },
+            update: { upiId },
+            create: {
+                userId,
+                upiId,
+                totalEarnings: 0,
+                pendingEarnings: 0,
+                totalTrips: 0,
+                rating: 5.0,
+                totalRatings: 0,
+                isVerified: false,
+                isAvailable: false,
+            } as any,
+        });
+        logger.info('[DriverWallet] UPI ID saved', { userId, upiId });
+        return { upiId };
+    }
+
+    /**
      * Get payout history
      */
     static async getPayoutHistory(userId: string, limit = 20) {

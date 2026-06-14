@@ -60,4 +60,22 @@ router.get('/payouts', asyncHandler(async (req: AuthRequest, res: Response) => {
     res.json({ success: true, data });
 }));
 
+// Save / update UPI ID only (no payout — just stores it in driver_profiles for QR payments)
+router.patch('/upi', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    const { upiId } = req.body;
+    if (!upiId || typeof upiId !== 'string' || !upiId.trim()) {
+        res.status(400).json({ success: false, message: 'upiId is required' });
+        return;
+    }
+    const trimmed = upiId.trim();
+    if (!trimmed.includes('@')) {
+        res.status(400).json({ success: false, message: 'Invalid UPI ID. Must be like yourname@upi or 9999999999@ybl' });
+        return;
+    }
+    const data = await DriverWalletService.saveUpiId(userId, trimmed);
+    res.json({ success: true, data });
+}));
+
 export default router;
