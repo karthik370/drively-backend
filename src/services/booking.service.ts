@@ -2026,30 +2026,46 @@ export class BookingService {
     }
 
     // Fetch driver's earned quiz badges separately (DriverBadge.driverId has no Prisma relation to User)
+    // Also fetch totalTrips by counting completed bookings (driverProfile may not exist for all drivers)
     if ((booking as any).driver?.id) {
+      const driverId = (booking as any).driver.id;
       try {
-        const driverBadges = await prisma.driverBadge.findMany({
-          where: {
-            driverId: (booking as any).driver.id,
-            badge: { isActive: true },
-          },
-          orderBy: { earnedAt: 'desc' },
-          take: 3,
-          select: {
-            earnedAt: true,
-            quizScore: true,
-            badge: {
-              select: {
-                id: true,
-                title: true,
-                icon: true,
-                color: true,
-                category: true,
+        const [driverBadges, completedTripsCount] = await Promise.all([
+          prisma.driverBadge.findMany({
+            where: {
+              driverId,
+              badge: { isActive: true },
+            },
+            orderBy: { earnedAt: 'desc' },
+            take: 3,
+            select: {
+              earnedAt: true,
+              quizScore: true,
+              badge: {
+                select: {
+                  id: true,
+                  title: true,
+                  icon: true,
+                  color: true,
+                  category: true,
+                },
               },
             },
-          },
-        });
+          }),
+          prisma.booking.count({
+            where: {
+              driverId,
+              status: BookingStatus.COMPLETED,
+            },
+          }),
+        ]);
         (booking as any).driver.driverBadges = driverBadges;
+        // Attach totalTrips to driver (works even if driverProfile is null)
+        if (!(booking as any).driver.driverProfile) {
+          (booking as any).driver.driverProfile = { totalTrips: completedTripsCount };
+        } else {
+          (booking as any).driver.driverProfile.totalTrips = completedTripsCount;
+        }
       } catch {
         (booking as any).driver.driverBadges = [];
       }

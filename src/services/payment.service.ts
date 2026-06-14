@@ -1,7 +1,7 @@
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
-import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId, getUpiQrLink } from './cashfree';
+import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId } from './cashfree';
 import { getSocketServer } from '../socket/io';
 import { logger } from '../utils/logger';
 
@@ -155,20 +155,15 @@ export class PaymentService {
       },
     });
 
-    // Try to get a proper UPI QR link (upi://pay?...) for QR scanning.
-    // The paymentSessionId alone is a browser checkout URL — UPI apps can't scan it.
+    // Build a UPI deep link (upi://pay?pa=...) using the driver's registered UPI ID.
+    // Cashfree's server-to-server UPI QR API (POST /orders/sessions) requires a special approval
+    // ("s2s_enabled") that is not enabled on this account, so we skip it entirely.
+    // A direct upi:// link works with all UPI apps (GPay, PhonePe, Paytm) when scanned as QR.
     let upiQrLink: string | null = null;
     let driverUpiId: string | null = null;
-    try {
-      upiQrLink = await getUpiQrLink({ paymentSessionId: cfOrder.paymentSessionId });
-      logger.info('[Payment] Got UPI QR link from Cashfree', { bookingId: booking.id });
-    } catch (e: any) {
-      logger.warn('[Payment] Cashfree UPI QR failed, trying driver UPI fallback', { error: e?.message });
-    }
+    let driverHasNoUpi = false;
 
-    // Fallback: If Cashfree QR fails, use driver's direct UPI ID to generate a upi://pay link.
-    // This is a standard UPI deep link that any UPI app can scan — no Cashfree needed.
-    if (!upiQrLink && booking.driverId) {
+    if (booking.driverId) {
       try {
         const driverProfile = await prisma.driverProfile.findUnique({
           where: { userId: booking.driverId },
@@ -177,15 +172,18 @@ export class PaymentService {
         if (driverProfile?.upiId) {
           driverUpiId = driverProfile.upiId;
           const driverName = encodeURIComponent(
-            [driverProfile.user?.firstName, driverProfile.user?.lastName].filter(Boolean).join(' ') || 'Drively Driver'
+            [driverProfile.user?.firstName, driverProfile.user?.lastName].filter(Boolean).join(' ') || 'Driver'
           );
           const amountStr = Number(booking.totalAmount).toFixed(2);
           const txnNote = encodeURIComponent(`Drively Ride ${booking.id.slice(-6).toUpperCase()}`);
           upiQrLink = `upi://pay?pa=${encodeURIComponent(driverUpiId)}&pn=${driverName}&am=${amountStr}&cu=INR&tn=${txnNote}`;
-          logger.info('[Payment] Using driver UPI fallback link', { bookingId: booking.id, upiId: driverUpiId });
+          logger.info('[Payment] Generated driver UPI QR link', { bookingId: booking.id, upiId: driverUpiId });
+        } else {
+          driverHasNoUpi = true;
+          logger.warn('[Payment] Driver has no UPI ID set — QR cannot be generated', { bookingId: booking.id, driverId: booking.driverId });
         }
-      } catch (e2: any) {
-        logger.warn('[Payment] Driver UPI fallback also failed', { error: e2?.message });
+      } catch (e: any) {
+        logger.warn('[Payment] Failed to fetch driver profile for UPI ID', { error: e?.message });
       }
     }
 
@@ -197,8 +195,9 @@ export class PaymentService {
       paymentSessionId: cfOrder.paymentSessionId,
       amount: cfOrder.orderAmount,
       currency: cfOrder.orderCurrency,
-      upiQrLink,   // UPI deep link for QR scanning (Cashfree or driver's direct UPI)
-      driverUpiId, // Driver's raw UPI ID (shown as text fallback in modal)
+      upiQrLink,        // upi://pay?... deep link — scannable by any UPI app (null if driver has no UPI)
+      driverUpiId,      // Raw UPI ID string for manual payment
+      driverHasNoUpi,   // True when driver hasn't configured UPI in their profile
     };
   }
 
