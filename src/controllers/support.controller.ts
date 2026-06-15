@@ -185,18 +185,41 @@ class SupportController {
     const threadUserId = admin ? String(threadUserIdRaw || '') : String(req.user.id);
     if (!threadUserId) throw new AppError('threadUserId is required', 400);
 
+    // Admin sees ALL messages in the thread; regular users only see their own copies
+    const whereClause = admin
+      ? {
+          type: 'SYSTEM' as any,
+          title: 'Need Help',
+          data: {
+            path: ['bookingId'],
+            equals: bookingId,
+          } as any,
+        }
+      : {
+          userId: req.user.id,
+          type: 'SYSTEM' as any,
+          title: 'Need Help',
+        };
+
     const rows = await prisma.notification.findMany({
-      where: {
-        userId: req.user.id,
-        type: 'SYSTEM' as any,
-        title: 'Need Help',
-      },
+      where: whereClause,
       orderBy: { createdAt: 'asc' },
       take: 2000,
     });
 
+    // Deduplicate by clientMessageId (same message stored for multiple recipients)
+    const seen = new Set<string>();
     const messages = rows
       .filter((n) => isSupportNotification(n, bookingId, threadUserId))
+      .filter((n) => {
+        const data = n.data as any;
+        const dedupeKey = typeof data?.clientMessageId === 'string' && data.clientMessageId
+          ? data.clientMessageId
+          : String(n.id);
+        if (seen.has(dedupeKey)) return false;
+        seen.add(dedupeKey);
+        return true;
+      })
       .map((n) => {
         const data = n.data as any;
         return {

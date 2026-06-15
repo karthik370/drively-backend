@@ -72,9 +72,10 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
         ? Number(trip.driverETA)
         : null;
 
-    // Show ETA only for pre-trip statuses — not during IN_PROGRESS/COMPLETED
-    const showETA = liveETA && liveETA > 0 && !['COMPLETED', 'CANCELLED', 'STARTED', 'IN_PROGRESS'].includes(trip.status);
-
+    // Show ETA for all active statuses, hide only for COMPLETED/CANCELLED
+    // Pre-trip: shows driver arrival ETA; During trip: shows estimated drop-off ETA
+    const showETA = liveETA && liveETA > 0 && !['COMPLETED', 'CANCELLED'].includes(trip.status);
+    const etaContext = ['STARTED', 'IN_PROGRESS'].includes(trip.status) ? 'to drop' : 'away';
 
     const ogDescription = driverName
       ? `${trip.customerName}'s ride with ${driverName} — track live on Drively`
@@ -454,7 +455,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
       <span id="statusText">${statusLabel}</span>
     </div>
     ${showETA
-      ? `<div class="eta-badge" id="etaBadge">${liveETA}<small>MIN</small></div>`
+      ? `<div class="eta-badge" id="etaBadge">${liveETA}<small>${etaContext.toUpperCase()}</small></div>`
       : `<div class="eta-badge" id="etaBadge" style="display:none"></div>`
     }
   </div>
@@ -702,14 +703,15 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
             statusBanner && statusBanner.classList.add('active');
           }
 
-          // Update ETA — use currentETA from DB (Google Maps API, same as shown in app).
-          // Falls back to driverETA if not yet populated.
+          // Update ETA — show for all active statuses.
+          // Pre-trip: driver arrival ETA; During trip: estimated drop-off ETA.
           const etaBadge = document.getElementById('etaBadge');
           if (etaBadge) {
-            const hideETA = ['COMPLETED', 'CANCELLED', 'STARTED', 'IN_PROGRESS'].includes(d.status);
+            const hideETA = ['COMPLETED', 'CANCELLED'].includes(d.status);
             const eta = d.currentETA ?? d.driverETA ?? null;
+            const etaCtx = ['STARTED', 'IN_PROGRESS'].includes(d.status) ? 'TO DROP' : 'AWAY';
             if (!hideETA && eta && eta > 0) {
-              etaBadge.innerHTML = Math.round(eta) + '<small>MIN</small>';
+              etaBadge.innerHTML = Math.round(eta) + '<small>' + etaCtx + '</small>';
               etaBadge.style.display = '';
             } else {
               etaBadge.style.display = 'none';
