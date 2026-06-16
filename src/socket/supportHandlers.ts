@@ -2,75 +2,17 @@ import { Server, Socket } from 'socket.io';
 import prisma from '../config/database';
 import { logger } from '../utils/logger';
 import { sendExpoPushNotification } from '../services/expoPush.service';
+import { isAdminPhone, getAdminUserIds } from '../utils/adminConfig';
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
   userType?: string;
 }
 
-const normalizePhoneDigits = (phone: string): string => {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (digits.length <= 10) return digits;
-  return digits.slice(-10);
-};
+const supportRoom = (bookingId: string, threadUserId: string) =>
+  `support:${bookingId}:${threadUserId}`;
 
-const parseAdminAllowlist = (raw: string): string[] => {
-  const trimmed = String(raw || '').trim();
-  if (!trimmed) return [];
-
-  if (trimmed.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        return parsed
-          .map((v) => String(v).trim())
-          .filter(Boolean)
-          .map(normalizePhoneDigits)
-          .filter(Boolean);
-      }
-    } catch {
-    }
-  }
-
-  return trimmed
-    .split(/[\s,;]+/g)
-    .map((v) => v.trim())
-    .filter(Boolean)
-    .map(normalizePhoneDigits)
-    .filter(Boolean);
-};
-
-const getAdminUserIds = async (): Promise<string[]> => {
-  const raw = String(
-    process.env.ADMIN_PHONE_NUMBERS ||
-      process.env.ADMIN_PHONES ||
-      process.env.ADMIN_PHONE ||
-      process.env.ADMIN_ALLOWLIST ||
-      ''
-  ).trim();
-
-  const allowed = parseAdminAllowlist(raw);
-  if (!allowed.length) return [];
-
-  try {
-    const users = await prisma.user.findMany({
-      where: {
-        OR: allowed.map((digits) => ({
-          phoneNumber: {
-            endsWith: digits,
-          },
-        })),
-      },
-      select: { id: true },
-    });
-
-    return users.map((u) => String(u.id));
-  } catch (error) {
-    logger.warn('Failed to load admin users for support chat', { error });
-    return [];
-  }
-};
-
+/** True if the socket belongs to the admin */
 const isAdminSocket = async (socket: AuthenticatedSocket): Promise<boolean> => {
   if (!socket.userId) return false;
   try {
@@ -78,106 +20,103 @@ const isAdminSocket = async (socket: AuthenticatedSocket): Promise<boolean> => {
       where: { id: socket.userId },
       select: { phoneNumber: true },
     });
-    if (!user?.phoneNumber) return false;
-
-    const raw = String(
-      process.env.ADMIN_PHONE_NUMBERS ||
-        process.env.ADMIN_PHONES ||
-        process.env.ADMIN_PHONE ||
-        process.env.ADMIN_ALLOWLIST ||
-        ''
-    ).trim();
-    if (!raw) return false;
-
-    const allowed = parseAdminAllowlist(raw);
-    if (!allowed.length) return false;
-
-    const current = normalizePhoneDigits(user.phoneNumber);
-    return Boolean(current && allowed.includes(current));
+    return Boolean(user?.phoneNumber && isAdminPhone(user.phoneNumber));
   } catch {
     return false;
   }
 };
 
-const supportRoom = (bookingId: string, threadUserId: string) => {
-  return `support:${bookingId}:${threadUserId}`;
+/**
+ * Resolve threadUserId for a support event.
+ * - Admin WITH threadUserId in payload → use that (they're replying to a user's thread)
+ * - Everyone else (including admin WITHOUT threadUserId) → use socket.userId
+ *   This ensures regular users are NEVER misidentified and messages never get dropped.
+ */
+const resolveThreadUserId = (socket: AuthenticatedSocket, isAdminSender: boolean, payloadThreadUserId?: string): string => {
+  if (isAdminSender && payloadThreadUserId) return String(payloadThreadUserId);
+  return String(socket.userId ?? '');
 };
 
 export const registerSupportHandlers = (io: Server, socket: AuthenticatedSocket) => {
+  // ── support:join ──────────────────────────────────────────────────────────
   socket.on('support:join', async (data: { bookingId: string; threadUserId?: string }) => {
-    const bookingId = String(data?.bookingId ?? '');
-    if (!socket.userId || !bookingId) return;
+    try {
+      const bookingId = String(data?.bookingId ?? '');
+      if (!socket.userId || !bookingId) return;
 
-    const admin = await isAdminSocket(socket);
-    const threadUserId = admin ? String(data?.threadUserId ?? '') : String(socket.userId);
-    if (!threadUserId) return;
+      const admin = await isAdminSocket(socket);
+      const threadUserId = resolveThreadUserId(socket, admin, data?.threadUserId);
+      if (!threadUserId) return;
 
-    socket.join(supportRoom(bookingId, threadUserId));
-    logger.info(`User ${socket.userId} joined support room: ${bookingId}:${threadUserId}`);
+      socket.join(supportRoom(bookingId, threadUserId));
+      logger.info(`[SupportChat] ${socket.userId} joined room ${bookingId}:${threadUserId}`);
+    } catch (e) {
+      logger.error('[SupportChat] support:join error', { error: e });
+    }
   });
 
+  // ── support:leave ─────────────────────────────────────────────────────────
   socket.on('support:leave', async (data: { bookingId: string; threadUserId?: string }) => {
-    const bookingId = String(data?.bookingId ?? '');
-    if (!socket.userId || !bookingId) return;
+    try {
+      const bookingId = String(data?.bookingId ?? '');
+      if (!socket.userId || !bookingId) return;
 
-    const admin = await isAdminSocket(socket);
-    const threadUserId = admin ? String(data?.threadUserId ?? '') : String(socket.userId);
-    if (!threadUserId) return;
+      const admin = await isAdminSocket(socket);
+      const threadUserId = resolveThreadUserId(socket, admin, data?.threadUserId);
+      if (!threadUserId) return;
 
-    socket.leave(supportRoom(bookingId, threadUserId));
-    logger.info(`User ${socket.userId} left support room: ${bookingId}:${threadUserId}`);
+      socket.leave(supportRoom(bookingId, threadUserId));
+      logger.info(`[SupportChat] ${socket.userId} left room ${bookingId}:${threadUserId}`);
+    } catch (e) {
+      logger.error('[SupportChat] support:leave error', { error: e });
+    }
   });
 
+  // ── support:message ───────────────────────────────────────────────────────
   socket.on(
     'support:message',
     async (data: { bookingId: string; threadUserId?: string; message: string; clientMessageId?: string }) => {
-      // Wrap the entire handler in try-catch — async socket handlers that throw cause silent failures
       try {
         const bookingId = String(data?.bookingId ?? '');
         const message = String(data?.message ?? '').trim();
-        const clientMessageId = typeof data?.clientMessageId === 'string' && data.clientMessageId
+        // Use null not undefined — Prisma Json fields silently drop undefined keys
+        const clientMessageId = (typeof data?.clientMessageId === 'string' && data.clientMessageId)
           ? data.clientMessageId
-          : null; // null, NOT undefined — Prisma Json fields silently fail on undefined
+          : null;
 
         if (!socket.userId || !bookingId || !message) {
-          logger.warn('[SupportChat] support:message ignored — missing required field', {
+          logger.warn('[SupportChat] support:message missing required field', {
             hasUserId: !!socket.userId, bookingId: !!bookingId, hasMessage: !!message,
           });
           return;
         }
 
-        // For non-admin: threadUserId = socket.userId (deterministic, no DB call needed)
-        // For admin: threadUserId comes from the payload
-        // Do NOT await isAdminSocket here before determining threadUserId —
-        // we can persist immediately for the non-admin case and handle admin separately
         const isAdminSender = await isAdminSocket(socket);
-        const threadUserId = isAdminSender
-          ? String(data?.threadUserId ?? '')
-          : String(socket.userId);
+        const threadUserId = resolveThreadUserId(socket, isAdminSender, data?.threadUserId);
 
         if (!threadUserId) {
-          logger.warn('[SupportChat] support:message ignored — empty threadUserId (admin without param?)', {
-            senderId: socket.userId, bookingId,
-          });
+          logger.error('[SupportChat] Could not resolve threadUserId', { senderId: socket.userId, bookingId });
           return;
         }
 
-        // ── STEP 1: Persist to DB immediately ──────────────────────────────────
-        // Do this BEFORE any optional lookups so history is always saved
-        let adminUserIds: string[] = [];
+        logger.info(`[SupportChat] Message from ${socket.userId} isAdmin=${isAdminSender} threadUserId=${threadUserId} bookingId=${bookingId}`);
+
+        // ── STEP 1: Persist to DB ──────────────────────────────────────────
+        let adminIds: string[] = [];
         try {
-          adminUserIds = await getAdminUserIds();
+          adminIds = await getAdminUserIds(prisma);
         } catch (e) {
-          logger.warn('[SupportChat] getAdminUserIds failed, falling back to empty', { error: e });
+          logger.warn('[SupportChat] getAdminUserIds failed', { error: e });
         }
 
-        const recipients = Array.from(new Set([threadUserId, ...adminUserIds])).filter(Boolean);
-        logger.info(`[SupportChat] Persisting message: bookingId=${bookingId} threadUserId=${threadUserId} recipients=${recipients.length}`);
+        // Recipients: threadUser (customer/driver) + admin
+        const recipients = Array.from(new Set([threadUserId, ...adminIds])).filter(Boolean);
+        logger.info(`[SupportChat] Persisting to ${recipients.length} recipient(s): ${recipients.join(', ')}`);
 
         try {
-          const created = await prisma.notification.createMany({
-            data: recipients.map((recipientUserId) => ({
-              userId: recipientUserId,
+          const result = await prisma.notification.createMany({
+            data: recipients.map((recipientId) => ({
+              userId: recipientId,
               type: 'SYSTEM' as any,
               title: 'Need Help',
               body: message,
@@ -190,14 +129,12 @@ export const registerSupportHandlers = (io: Server, socket: AuthenticatedSocket)
               },
             })),
           });
-          logger.info(`[SupportChat] ✓ Stored ${created.count} notification(s)`);
+          logger.info(`[SupportChat] ✓ Stored ${result.count} notification(s)`);
         } catch (dbError) {
-          logger.error('[SupportChat] ✗ DB write FAILED — messages will NOT appear in history', {
-            error: dbError, bookingId, threadUserId, recipients,
-          });
+          logger.error('[SupportChat] ✗ DB write FAILED', { error: dbError, bookingId, threadUserId });
         }
 
-        // ── STEP 2: Resolve sender name (best-effort, doesn't gate anything) ──
+        // ── STEP 2: Sender name (optional, non-blocking) ───────────────────
         let senderName = '';
         let senderRole = '';
         try {
@@ -207,7 +144,7 @@ export const registerSupportHandlers = (io: Server, socket: AuthenticatedSocket)
           });
           if (sender) {
             senderName = `${String(sender.firstName ?? '')} ${String(sender.lastName ?? '')}`.trim();
-            senderRole = typeof (sender as any).userType === 'string' ? String((sender as any).userType) : '';
+            senderRole = String((sender as any).userType ?? '');
           }
         } catch { /* non-fatal */ }
 
@@ -222,28 +159,28 @@ export const registerSupportHandlers = (io: Server, socket: AuthenticatedSocket)
           timestamp: new Date(),
         };
 
-        // ── STEP 3: Emit real-time events ───────────────────────────────────────
+        // ── STEP 3: Real-time emit ─────────────────────────────────────────
+        // Emit to the support room AND each recipient's personal channel
         io.to(supportRoom(bookingId, threadUserId)).emit('support:message', payload);
-        for (const recipientUserId of recipients) {
-          io.to(`user:${recipientUserId}`).emit('support:message', payload);
+        for (const recipientId of recipients) {
+          io.to(`user:${recipientId}`).emit('support:message', payload);
         }
 
-        // ── STEP 4: Push notifications (best-effort) ────────────────────────────
+        // ── STEP 4: Push notification (non-blocking) ───────────────────────
         try {
-          const pushRecipients = recipients.filter((u) => String(u) !== String(socket.userId));
-          if (pushRecipients.length) {
+          const pushTo = recipients.filter((u) => u !== String(socket.userId));
+          if (pushTo.length) {
             await sendExpoPushNotification({
-              userIds: pushRecipients,
+              userIds: pushTo,
               title: 'Need Help',
-              body: `${senderName ? `${senderName}${senderRole ? ` (${senderRole})` : ''}: ` : ''}${message}`,
-              data: { kind: 'support_chat', bookingId: String(bookingId), threadUserId: String(threadUserId) },
+              body: `${senderName ? `${senderName}: ` : ''}${message}`,
+              data: { kind: 'support_chat', bookingId, threadUserId },
             });
           }
         } catch { /* push failure is non-fatal */ }
 
       } catch (outerError) {
-        // Catch-all — no async rejection should crash the socket handler silently
-        logger.error('[SupportChat] Unhandled error in support:message handler', { error: outerError });
+        logger.error('[SupportChat] Unhandled error in support:message', { error: outerError });
       }
     }
   );

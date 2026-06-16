@@ -2,53 +2,11 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { AppError, asyncHandler } from '../middleware/errorHandler';
+import { isAdminPhone } from '../utils/adminConfig';
 
-const normalizePhoneDigits = (phone: string): string => {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (digits.length <= 10) return digits;
-  return digits.slice(-10);
-};
+const isAdminUser = (phoneNumber: string): boolean => isAdminPhone(phoneNumber);
 
-const parseAdminAllowlist = (raw: string): string[] => {
-  const trimmed = String(raw || '').trim();
-  if (!trimmed) return [];
 
-  if (trimmed.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        return parsed
-          .map((v) => String(v).trim())
-          .filter(Boolean)
-          .map(normalizePhoneDigits)
-          .filter(Boolean);
-      }
-    } catch {
-    }
-  }
-
-  return trimmed
-    .split(/[\s,;]+/g)
-    .map((v) => v.trim())
-    .filter(Boolean)
-    .map(normalizePhoneDigits)
-    .filter(Boolean);
-};
-
-const isAdminUser = (phoneNumber: string): boolean => {
-  const raw = String(
-    process.env.ADMIN_PHONE_NUMBERS ||
-      process.env.ADMIN_PHONES ||
-      process.env.ADMIN_PHONE ||
-      process.env.ADMIN_ALLOWLIST ||
-      ''
-  ).trim();
-  if (!raw) return false;
-  const allowed = parseAdminAllowlist(raw);
-  if (!allowed.length) return false;
-  const current = normalizePhoneDigits(phoneNumber);
-  return Boolean(current && allowed.includes(current));
-};
 
 const isSupportNotification = (n: any, bookingId?: string, threadUserId?: string) => {
   if (!n) return false;
