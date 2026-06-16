@@ -177,26 +177,38 @@ class SupportController {
   static listMessages = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
 
+    // Always prevent caching — message list changes frequently
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const bookingId = String(req.params.bookingId ?? '');
     if (!bookingId) throw new AppError('bookingId is required', 400);
 
     const admin = isAdminUser(req.user.phoneNumber);
     const threadUserIdRaw = typeof req.query.threadUserId === 'string' ? req.query.threadUserId : '';
-    // Admin without explicit threadUserId (e.g. opened from booking details) → use their own id
     const threadUserId = admin
-      ? (String(threadUserIdRaw || '') || String(req.user.id))
+      ? (String(threadUserIdRaw || '') || '')
       : String(req.user.id);
-    if (!threadUserId) throw new AppError('threadUserId is required', 400);
 
-    // Admin sees ALL messages in the thread; regular users only see their own copies
+    // For non-admin: threadUserId is always their own id
+    // For admin: threadUserId must be provided (the customer or driver's id)
+    // If admin has no threadUserId, return empty — they should pick a thread from inbox
+    if (!threadUserId) {
+      res.json({ success: true, message: 'Support messages', data: [] });
+      return;
+    }
+
+    // Fetch notification rows:
+    // - For non-admin: their own copy (userId = req.user.id), filtered by bookingId+threadUserId in data
+    // - For admin: all copies stored for the threadUserId (the person who asked for help)
+    //   This ensures dedup works correctly and all messages are visible
     const whereClause = admin
       ? {
+          // Admin reads the threadUser's copy — contains all messages for that thread
+          userId: threadUserId,
           type: 'SYSTEM' as any,
           title: 'Need Help',
-          data: {
-            path: ['bookingId'],
-            equals: bookingId,
-          } as any,
         }
       : {
           userId: req.user.id,
