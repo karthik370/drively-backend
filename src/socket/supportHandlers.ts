@@ -131,85 +131,119 @@ export const registerSupportHandlers = (io: Server, socket: AuthenticatedSocket)
   socket.on(
     'support:message',
     async (data: { bookingId: string; threadUserId?: string; message: string; clientMessageId?: string }) => {
-      const bookingId = String(data?.bookingId ?? '');
-      const message = String(data?.message ?? '').trim();
-      // Use null (not undefined) for missing clientMessageId — undefined in a Prisma Json field causes createMany to fail silently
-      const clientMessageId = typeof data?.clientMessageId === 'string' && data.clientMessageId ? data.clientMessageId : null;
-
-      if (!socket.userId || !bookingId || !message) return;
-
-      const admin = await isAdminSocket(socket);
-      const threadUserId = admin ? String(data?.threadUserId ?? '') : String(socket.userId);
-      if (!threadUserId) return;
-
-      let senderName = '';
-      let senderRole = '';
+      // Wrap the entire handler in try-catch — async socket handlers that throw cause silent failures
       try {
-        const sender = await prisma.user.findUnique({
-          where: { id: String(socket.userId) },
-          select: { firstName: true, lastName: true, userType: true },
-        });
-        if (sender) {
-          senderName = `${String(sender.firstName ?? '')} ${String(sender.lastName ?? '')}`.trim();
-          senderRole = typeof (sender as any).userType === 'string' ? String((sender as any).userType) : '';
+        const bookingId = String(data?.bookingId ?? '');
+        const message = String(data?.message ?? '').trim();
+        const clientMessageId = typeof data?.clientMessageId === 'string' && data.clientMessageId
+          ? data.clientMessageId
+          : null; // null, NOT undefined — Prisma Json fields silently fail on undefined
+
+        if (!socket.userId || !bookingId || !message) {
+          logger.warn('[SupportChat] support:message ignored — missing required field', {
+            hasUserId: !!socket.userId, bookingId: !!bookingId, hasMessage: !!message,
+          });
+          return;
         }
-      } catch {
-      }
 
-      const payload = {
-        bookingId,
-        threadUserId,
-        senderId: String(socket.userId),
-        senderName,
-        senderRole,
-        message,
-        clientMessageId,
-        timestamp: new Date(),
-      };
+        // For non-admin: threadUserId = socket.userId (deterministic, no DB call needed)
+        // For admin: threadUserId comes from the payload
+        // Do NOT await isAdminSocket here before determining threadUserId —
+        // we can persist immediately for the non-admin case and handle admin separately
+        const isAdminSender = await isAdminSocket(socket);
+        const threadUserId = isAdminSender
+          ? String(data?.threadUserId ?? '')
+          : String(socket.userId);
 
-      const adminUserIds = await getAdminUserIds();
-      const recipients = Array.from(new Set([threadUserId, ...adminUserIds])).filter(Boolean);
+        if (!threadUserId) {
+          logger.warn('[SupportChat] support:message ignored — empty threadUserId (admin without param?)', {
+            senderId: socket.userId, bookingId,
+          });
+          return;
+        }
 
-      try {
-        await prisma.notification.createMany({
-          data: recipients.map((recipientUserId) => ({
-            userId: recipientUserId,
-            type: 'SYSTEM' as any,
-            title: 'Need Help',
-            body: message,
-            data: {
-              kind: 'support_chat',
-              bookingId,
-              threadUserId,
-              senderId: String(socket.userId),
-              // clientMessageId: null instead of undefined — Prisma Json fields reject undefined silently
-              clientMessageId: clientMessageId ?? null,
-            },
-          })),
-        });
-        logger.info(`[SupportChat] Stored ${recipients.length} notification(s) for bookingId=${bookingId} threadUserId=${threadUserId}`);
-      } catch (error) {
-        // Log as ERROR so it's visible in production — this is the reason history doesn't load
-        logger.error('[SupportChat] FAILED to persist message to DB', { error, bookingId, threadUserId, recipients });
-      }
+        // ── STEP 1: Persist to DB immediately ──────────────────────────────────
+        // Do this BEFORE any optional lookups so history is always saved
+        let adminUserIds: string[] = [];
+        try {
+          adminUserIds = await getAdminUserIds();
+        } catch (e) {
+          logger.warn('[SupportChat] getAdminUserIds failed, falling back to empty', { error: e });
+        }
 
-      io.to(supportRoom(bookingId, threadUserId)).emit('support:message', payload);
+        const recipients = Array.from(new Set([threadUserId, ...adminUserIds])).filter(Boolean);
+        logger.info(`[SupportChat] Persisting message: bookingId=${bookingId} threadUserId=${threadUserId} recipients=${recipients.length}`);
 
-      for (const userId of recipients) {
-        io.to(`user:${userId}`).emit('support:message', payload);
-      }
-
-      try {
-        const pushRecipients = recipients.filter((u) => String(u) !== String(socket.userId));
-        if (pushRecipients.length) {
-          await sendExpoPushNotification({
-            userIds: pushRecipients,
-            title: 'Need Help',
-            body: `${senderName ? `${senderName}${senderRole ? ` (${senderRole})` : ''}: ` : ''}${message}`,
-            data: { kind: 'support_chat', bookingId: String(bookingId), threadUserId: String(threadUserId) },
+        try {
+          const created = await prisma.notification.createMany({
+            data: recipients.map((recipientUserId) => ({
+              userId: recipientUserId,
+              type: 'SYSTEM' as any,
+              title: 'Need Help',
+              body: message,
+              data: {
+                kind: 'support_chat',
+                bookingId,
+                threadUserId,
+                senderId: String(socket.userId),
+                clientMessageId,
+              },
+            })),
+          });
+          logger.info(`[SupportChat] ✓ Stored ${created.count} notification(s)`);
+        } catch (dbError) {
+          logger.error('[SupportChat] ✗ DB write FAILED — messages will NOT appear in history', {
+            error: dbError, bookingId, threadUserId, recipients,
           });
         }
-      } catch {
+
+        // ── STEP 2: Resolve sender name (best-effort, doesn't gate anything) ──
+        let senderName = '';
+        let senderRole = '';
+        try {
+          const sender = await prisma.user.findUnique({
+            where: { id: String(socket.userId) },
+            select: { firstName: true, lastName: true, userType: true },
+          });
+          if (sender) {
+            senderName = `${String(sender.firstName ?? '')} ${String(sender.lastName ?? '')}`.trim();
+            senderRole = typeof (sender as any).userType === 'string' ? String((sender as any).userType) : '';
+          }
+        } catch { /* non-fatal */ }
+
+        const payload = {
+          bookingId,
+          threadUserId,
+          senderId: String(socket.userId),
+          senderName,
+          senderRole,
+          message,
+          clientMessageId,
+          timestamp: new Date(),
+        };
+
+        // ── STEP 3: Emit real-time events ───────────────────────────────────────
+        io.to(supportRoom(bookingId, threadUserId)).emit('support:message', payload);
+        for (const recipientUserId of recipients) {
+          io.to(`user:${recipientUserId}`).emit('support:message', payload);
+        }
+
+        // ── STEP 4: Push notifications (best-effort) ────────────────────────────
+        try {
+          const pushRecipients = recipients.filter((u) => String(u) !== String(socket.userId));
+          if (pushRecipients.length) {
+            await sendExpoPushNotification({
+              userIds: pushRecipients,
+              title: 'Need Help',
+              body: `${senderName ? `${senderName}${senderRole ? ` (${senderRole})` : ''}: ` : ''}${message}`,
+              data: { kind: 'support_chat', bookingId: String(bookingId), threadUserId: String(threadUserId) },
+            });
+          }
+        } catch { /* push failure is non-fatal */ }
+
+      } catch (outerError) {
+        // Catch-all — no async rejection should crash the socket handler silently
+        logger.error('[SupportChat] Unhandled error in support:message handler', { error: outerError });
       }
     }
   );
