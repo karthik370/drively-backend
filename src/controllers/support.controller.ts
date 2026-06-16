@@ -182,7 +182,10 @@ class SupportController {
 
     const admin = isAdminUser(req.user.phoneNumber);
     const threadUserIdRaw = typeof req.query.threadUserId === 'string' ? req.query.threadUserId : '';
-    const threadUserId = admin ? String(threadUserIdRaw || '') : String(req.user.id);
+    // Admin without explicit threadUserId (e.g. opened from booking details) → use their own id
+    const threadUserId = admin
+      ? (String(threadUserIdRaw || '') || String(req.user.id))
+      : String(req.user.id);
     if (!threadUserId) throw new AppError('threadUserId is required', 400);
 
     // Admin sees ALL messages in the thread; regular users only see their own copies
