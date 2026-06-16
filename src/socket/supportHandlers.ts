@@ -133,7 +133,8 @@ export const registerSupportHandlers = (io: Server, socket: AuthenticatedSocket)
     async (data: { bookingId: string; threadUserId?: string; message: string; clientMessageId?: string }) => {
       const bookingId = String(data?.bookingId ?? '');
       const message = String(data?.message ?? '').trim();
-      const clientMessageId = typeof data?.clientMessageId === 'string' ? data.clientMessageId : undefined;
+      // Use null (not undefined) for missing clientMessageId — undefined in a Prisma Json field causes createMany to fail silently
+      const clientMessageId = typeof data?.clientMessageId === 'string' && data.clientMessageId ? data.clientMessageId : null;
 
       if (!socket.userId || !bookingId || !message) return;
 
@@ -171,8 +172,8 @@ export const registerSupportHandlers = (io: Server, socket: AuthenticatedSocket)
 
       try {
         await prisma.notification.createMany({
-          data: recipients.map((userId) => ({
-            userId,
+          data: recipients.map((recipientUserId) => ({
+            userId: recipientUserId,
             type: 'SYSTEM' as any,
             title: 'Need Help',
             body: message,
@@ -181,12 +182,15 @@ export const registerSupportHandlers = (io: Server, socket: AuthenticatedSocket)
               bookingId,
               threadUserId,
               senderId: String(socket.userId),
-              clientMessageId,
-            } as any,
+              // clientMessageId: null instead of undefined — Prisma Json fields reject undefined silently
+              clientMessageId: clientMessageId ?? null,
+            },
           })),
         });
+        logger.info(`[SupportChat] Stored ${recipients.length} notification(s) for bookingId=${bookingId} threadUserId=${threadUserId}`);
       } catch (error) {
-        logger.warn('Failed to persist support chat message as notifications', { error, bookingId, threadUserId });
+        // Log as ERROR so it's visible in production — this is the reason history doesn't load
+        logger.error('[SupportChat] FAILED to persist message to DB', { error, bookingId, threadUserId, recipients });
       }
 
       io.to(supportRoom(bookingId, threadUserId)).emit('support:message', payload);

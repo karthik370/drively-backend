@@ -51,6 +51,9 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const app: Application = express();
 app.set('trust proxy', 1);
+// Disable ETags globally — dynamic endpoints like support chat history must never return 304
+// (an empty message list has the same ETag as a list with messages if the body hash coincidentally matches)
+app.set('etag', false);
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
