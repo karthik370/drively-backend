@@ -402,6 +402,18 @@ export class BookingController {
       throw new AppError(error.details[0].message, 400);
     }
 
+    // SECURITY: Verify user is a participant in this booking
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { customerId: true, driverId: true },
+    });
+    if (!booking) {
+      throw new AppError('Booking not found', 404);
+    }
+    if (booking.customerId !== req.user.id && booking.driverId !== req.user.id) {
+      throw new AppError('Not authorized to update this booking', 403);
+    }
+
     const result = await BookingService.updateBookingStatus({
       bookingId,
       userId: req.user.id,

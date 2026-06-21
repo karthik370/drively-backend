@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireAdminAllowlist } from '../middleware/auth';
 import { AuthRequest } from '../middleware/auth';
 import { asyncHandler } from '../middleware/errorHandler';
 import { EmergencyService } from '../services/emergency.service';
@@ -43,13 +43,9 @@ router.post('/:emergencyId/resolve', asyncHandler(async (req: AuthRequest, res: 
  * GET /api/v1/emergency/active
  * List all active emergencies (admin only — checked by phone).
  */
-router.get('/active', asyncHandler(async (req: AuthRequest, res: Response) => {
+router.get('/active', requireAdminAllowlist, asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
     if (!userId) throw new AppError('Not authenticated', 401);
-    // Basic admin check (same pattern used elsewhere in the app)
-    const phone = String((req.user as any)?.phoneNumber || '').replace(/\D/g, '');
-    const last10 = phone.length > 10 ? phone.slice(-10) : phone;
-    if (last10 !== '6304767391') throw new AppError('Admin access only', 403);
 
     const emergencies = await EmergencyService.getActiveEmergencies();
     res.json({ success: true, data: emergencies });

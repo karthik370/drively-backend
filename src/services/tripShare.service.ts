@@ -94,7 +94,7 @@ export class TripShareService {
             } : null,
             vehicleType: booking.vehicleType,
             tripType: booking.tripType,
-            totalAmount: booking.totalAmount ? Number(booking.totalAmount) : null,
+            // NOTE: totalAmount intentionally excluded from public tracking for privacy
             scheduledTime: booking.scheduledTime,
             createdAt: booking.createdAt,
         };

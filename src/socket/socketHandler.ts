@@ -1,6 +1,7 @@
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { logger } from '../utils/logger';
+import { cacheGet } from '../config/redis';
 import { registerLocationHandlers } from './locationHandlers';
 import { registerBookingHandlers } from './bookingHandlers';
 import { registerSupportHandlers } from './supportHandlers';
@@ -17,6 +18,16 @@ export const initializeSocket = (io: Server) => {
       
       if (!token) {
         return next(new Error('Authentication error'));
+      }
+
+      // SECURITY: Check token blacklist (matches REST authenticate middleware)
+      try {
+        const blacklisted = await cacheGet(`blacklist:${token}`);
+        if (blacklisted) {
+          return next(new Error('Token has been revoked'));
+        }
+      } catch {
+        // Redis unavailable — allow connection (graceful degradation)
       }
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;

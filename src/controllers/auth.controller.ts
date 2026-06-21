@@ -150,7 +150,8 @@ const verifyMsg91AccessTokenAndExtract = async (accessToken: string, claimedPhon
 };
 
 const generateOtpSignupToken = (payload: { identifierRaw: string; phoneNumber?: string | null; email?: string | null }): string => {
-  const secret = String(process.env.JWT_SECRET || 'fallback-secret');
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new AppError('JWT_SECRET is not configured', 500);
   return jwt.sign(
     {
       typ: 'otp_signup',
@@ -164,7 +165,8 @@ const generateOtpSignupToken = (payload: { identifierRaw: string; phoneNumber?: 
 };
 
 const verifyOtpSignupToken = (token: string): { identifierRaw: string; phoneNumber: string | null; email: string | null } => {
-  const secret = String(process.env.JWT_SECRET || 'fallback-secret');
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new AppError('JWT_SECRET is not configured', 500);
   const decoded = jwt.verify(token, secret) as any;
   if (!decoded || String(decoded.typ || '') !== 'otp_signup') {
     throw new AppError('Invalid or expired OTP token', 401);
@@ -503,27 +505,14 @@ export class AuthController {
     });
   });
 
-  static socialLogin = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { provider, providerId, email, firstName, lastName, profileImage } = req.body;
-
-    if (!provider || !email || !firstName || !lastName) {
-      throw new AppError('Missing required fields', 400);
-    }
-
-    const result = await AuthService.socialLogin(
-      provider,
-      providerId,
-      email,
-      firstName,
-      lastName,
-      profileImage
+  static socialLogin = asyncHandler(async (_req: AuthRequest, _res: Response) => {
+    // SECURITY: Social login is disabled until server-side provider token
+    // verification is implemented (Google tokeninfo, Apple JWKS, etc.).
+    // Without it, any attacker can pass an arbitrary email to get a valid JWT.
+    throw new AppError(
+      'Social login is temporarily unavailable. Please use phone number login.',
+      501
     );
-
-    res.status(200).json({
-      success: true,
-      message: 'Social login successful',
-      data: result,
-    });
   });
   static adminLogin = asyncHandler(async (req: AuthRequest, res: Response) => {
     const schema = Joi.object({

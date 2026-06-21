@@ -4,6 +4,15 @@ import { logger } from '../utils/logger';
 
 const router = Router();
 
+// SECURITY: HTML-escape user-provided strings before embedding in SSR HTML
+const escapeHtml = (str: string): string =>
+  String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
 /**
  * GET /track/:shareToken
  * Serves a self-contained HTML tracking page for shared trips.
@@ -50,12 +59,12 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     const statusColor = statusColors[trip.status] || '#6b7280';
 
     const driverName = trip.driver
-      ? `${trip.driver.firstName} ${trip.driver.lastName || ''}`.trim()
+      ? escapeHtml(`${trip.driver.firstName} ${trip.driver.lastName || ''}`.trim())
       : '';
     const vehicleInfo = trip.driver?.vehicle
-      ? `${[trip.driver.vehicle.color, trip.driver.vehicle.make, trip.driver.vehicle.model].filter(Boolean).join(' ')}`.trim()
+      ? escapeHtml(`${[trip.driver.vehicle.color, trip.driver.vehicle.make, trip.driver.vehicle.model].filter(Boolean).join(' ')}`.trim())
       : '';
-    const licensePlate = trip.driver?.vehicle?.licensePlate || '';
+    const licensePlate = trip.driver?.vehicle?.licensePlate ? escapeHtml(trip.driver.vehicle.licensePlate) : '';
     const driverLat = trip.driver?.currentLocation?.latitude;
     const driverLng = trip.driver?.currentLocation?.longitude;
     const pickupLat = trip.pickup?.latitude;
@@ -78,8 +87,8 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     const etaContext = ['STARTED', 'IN_PROGRESS'].includes(trip.status) ? 'to drop' : 'away';
 
     const ogDescription = driverName
-      ? `${trip.customerName}'s ride with ${driverName} — track live on Drively`
-      : `Track ${trip.customerName}'s ride live on Drively`;
+      ? escapeHtml(`${trip.customerName}'s ride with ${driverName} — track live on Drively`)
+      : escapeHtml(`Track ${trip.customerName}'s ride live on Drively`);
 
     // Build static map URL as guaranteed fallback (works without JS)
     const staticMapMarkers = [
@@ -485,7 +494,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
         <div class="route-dot pickup"></div>
         <div>
           <div class="route-label">Pickup</div>
-          <div class="route-address" id="pickupAddr">${trip.pickupAddress || 'Pickup location'}</div>
+          <div class="route-address" id="pickupAddr">${escapeHtml(trip.pickupAddress || 'Pickup location')}</div>
         </div>
       </div>
       ${trip.dropAddress ? `
@@ -493,7 +502,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
         <div class="route-dot drop"></div>
         <div>
           <div class="route-label">Drop-off</div>
-          <div class="route-address" id="dropAddr">${trip.dropAddress}</div>
+          <div class="route-address" id="dropAddr">${escapeHtml(trip.dropAddress)}</div>
         </div>
       </div>` : ''}
     </div>
@@ -513,7 +522,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
   <div class="ended-overlay" id="endedOverlay">
     <div class="ended-icon" id="endedIcon">✅</div>
     <div class="ended-title" id="endedTitle">Trip Completed</div>
-    <div class="ended-sub" id="endedSub">${trip.customerName}'s ride has been completed safely.</div>
+    <div class="ended-sub" id="endedSub">${escapeHtml(trip.customerName)}'s ride has been completed safely.</div>
   </div>
 
   <script>

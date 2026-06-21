@@ -80,7 +80,7 @@ export class OtpService {
             },
           })
         );
-        logger.info(`OTP sent via SNS to ${phoneNumber}`);
+        logger.info(`OTP sent via SNS to ***${phoneNumber.slice(-4)}`);
       } catch (error) {
         logger.error('SNS error:', error);
         throw new AppError('Failed to send OTP', 500);
@@ -92,14 +92,18 @@ export class OtpService {
           from: process.env.TWILIO_PHONE_NUMBER,
           to: phoneNumber,
         });
-        logger.info(`OTP sent via Twilio to ${phoneNumber}`);
+        logger.info(`OTP sent via Twilio to ***${phoneNumber.slice(-4)}`);
       } catch (error) {
         logger.error('Twilio error:', error);
         throw new AppError('Failed to send OTP', 500);
       }
     } else {
-      logger.info(`[DEV MODE] OTP for ${phoneNumber}: ${otp}`);
-      console.log(`\n🔐 OTP for ${phoneNumber}: ${otp}\n`);
+      // Dev fallback — no SMS provider configured
+      const redactedPhone = phoneNumber.slice(0, -4).replace(/./g, '*') + phoneNumber.slice(-4);
+      logger.info(`[DEV MODE] OTP for ${redactedPhone}: ${otp}`);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`\n🔐 OTP for ${redactedPhone}: ${otp}\n`);
+      }
     }
 
     // Set cooldown — gracefully skip if Redis is unavailable

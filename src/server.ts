@@ -89,8 +89,35 @@ app.use((req, res, next) => {
   }
   return helmet()(req, res, next);
 });
+// SECURITY: CORS origin allowlist — no wildcard fallback
+const corsOrigins = (() => {
+  const origins: (string | RegExp)[] = [];
+  // Production frontend(s)
+  if (process.env.FRONTEND_URL) {
+    process.env.FRONTEND_URL.split(',').forEach(u => {
+      const trimmed = u.trim();
+      if (trimmed) origins.push(trimmed);
+    });
+  }
+  // Admin dashboard
+  if (process.env.ADMIN_DASHBOARD_URL) {
+    origins.push(process.env.ADMIN_DASHBOARD_URL.trim());
+  }
+  // Always allow localhost in development
+  if (process.env.NODE_ENV !== 'production') {
+    origins.push(/^https?:\/\/localhost(:\d+)?$/);
+    origins.push(/^https?:\/\/127\.0\.0\.1(:\d+)?$/);
+  }
+  // If nothing configured, allow the known production domain
+  if (origins.length === 0) {
+    origins.push('https://v2.kurnm.click');
+    origins.push(/^https?:\/\/localhost(:\d+)?$/);
+  }
+  return origins;
+})();
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: corsOrigins,
   credentials: true,
 }));
 app.use(compression());
@@ -158,9 +185,24 @@ const bookingStatusLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// SECURITY: Strict rate limit for auth/OTP endpoints to prevent SMS bombing,
+// OTP brute-force, and credential stuffing attacks
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: 'Too many authentication attempts. Please try again in a minute.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use('/api/', (req, res, next) => {
   const apiVersion = process.env.API_VERSION || 'v1';
   const url = String(req.originalUrl || req.url || '');
+
+  // Auth endpoints get strict per-IP limiting
+  if (url.startsWith(`/api/${apiVersion}/auth/`)) {
+    return authLimiter(req, res, next);
+  }
 
   if (url.startsWith(`/api/${apiVersion}/bookings/available`)) {
     return bookingsAvailableLimiter(req, res, next);
@@ -188,9 +230,6 @@ app.get('/', (_req, res) => {
   res.status(200).json({
     service: 'drivemate-api',
     status: 'OK',
-    health: '/health',
-    docs: '/api-docs',
-    apiBase: `/api/${API_VERSION}`,
   });
 });
 

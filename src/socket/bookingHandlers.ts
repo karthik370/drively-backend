@@ -205,37 +205,50 @@ export const registerBookingHandlers = (io: Server, socket: AuthenticatedSocket)
   });
 
   socket.on('chat:message', async (data: { bookingId: string; message: string; clientMessageId?: string }) => {
-    const timestamp = new Date();
-    io.to(`booking:${data.bookingId}`).emit('chat:message', {
-      bookingId: data.bookingId,
-      senderId: socket.userId,
-      message: data.message,
-      clientMessageId: data.clientMessageId,
-      timestamp,
-    });
+    if (!socket.userId || !data.bookingId || !data.message) return;
 
-    // Send push notification to the other party
+    // ── Security: verify sender is a participant in this booking ──
     try {
       const booking = await prisma.booking.findUnique({
         where: { id: data.bookingId },
         select: { customerId: true, driverId: true },
       });
-      if (booking) {
-        const recipientId =
-          socket.userId === booking.customerId
-            ? booking.driverId
-            : booking.customerId;
-        if (recipientId) {
-          await sendExpoPushNotification({
-            userIds: [recipientId],
-            title: 'New message',
-            body: data.message.length > 80 ? data.message.slice(0, 80) + '…' : data.message,
-            data: { kind: 'chat', bookingId: data.bookingId },
-          });
-        }
+
+      if (!booking) {
+        logger.warn('chat:message rejected — booking not found', { bookingId: data.bookingId, userId: socket.userId });
+        return;
+      }
+
+      const isParticipant = booking.customerId === socket.userId || booking.driverId === socket.userId;
+      if (!isParticipant) {
+        logger.warn('chat:message rejected — user not in booking', { bookingId: data.bookingId, userId: socket.userId });
+        return;
+      }
+
+      const timestamp = new Date();
+      io.to(`booking:${data.bookingId}`).emit('chat:message', {
+        bookingId: data.bookingId,
+        senderId: socket.userId,
+        message: data.message,
+        clientMessageId: data.clientMessageId,
+        timestamp,
+      });
+
+      // Send push notification to the other party
+      const recipientId =
+        socket.userId === booking.customerId
+          ? booking.driverId
+          : booking.customerId;
+      if (recipientId) {
+        await sendExpoPushNotification({
+          userIds: [recipientId],
+          title: 'New message',
+          body: data.message.length > 80 ? data.message.slice(0, 80) + '…' : data.message,
+          data: { kind: 'chat', bookingId: data.bookingId },
+        });
       }
     } catch (err) {
-      logger.warn('Failed to send chat push notification', { error: err, bookingId: data.bookingId });
+      logger.warn('chat:message failed', { error: err, bookingId: data.bookingId, userId: socket.userId });
     }
   });
 };

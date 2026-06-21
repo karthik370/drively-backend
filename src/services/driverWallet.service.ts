@@ -383,16 +383,19 @@ export class DriverWalletService {
         }
 
         // Cashfree Payouts webhook uses HMAC-SHA256 with client_secret as key
-        if (signature) {
-            const computed = crypto
-                .createHmac('sha256', clientSecret)
-                .update(rawBody)
-                .digest('base64');
+        if (!signature) {
+            logger.warn('Payout webhook missing signature header');
+            throw new AppError('Webhook signature required', 401);
+        }
 
-            if (computed !== signature) {
-                logger.warn('Payout webhook signature mismatch', { received: signature, computed });
-                // Log but don't reject — Cashfree sandbox may not always sign correctly
-            }
+        const computed = crypto
+            .createHmac('sha256', clientSecret)
+            .update(rawBody)
+            .digest('base64');
+
+        if (computed !== signature) {
+            logger.warn('Payout webhook signature mismatch', { received: signature, computed });
+            throw new AppError('Invalid webhook signature', 401);
         }
 
         logger.info('Payout webhook received', { payload: JSON.stringify(payload) });

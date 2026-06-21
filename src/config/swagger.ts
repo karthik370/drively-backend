@@ -64,6 +64,18 @@ const options: swaggerJsdoc.Options = {
 const swaggerSpec = swaggerJsdoc(options);
 
 const swaggerDocs = (app: Application, _port: number) => {
+  // SECURITY: Only expose API docs in non-production environments
+  // Browser testing confirmed /api-docs leaks internal server URLs
+  if (process.env.NODE_ENV === 'production') {
+    app.use('/api-docs', (_req, res) => {
+      res.status(404).json({ success: false, message: 'Not found' });
+    });
+    app.get('/api-docs.json', (_req, res) => {
+      res.status(404).json({ success: false, message: 'Not found' });
+    });
+    return;
+  }
+
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
     customCss: '.swagger-ui .topbar { display: none }',
     customSiteTitle: 'DriveMate API Docs',
