@@ -193,6 +193,34 @@ export const checkDigiLockerCompletion = async (userId: string) => {
   return getKycStatus(userId);
 };
 
+// ── Name fuzzy match helper ────────────────────────────────────────────────
+// Normalizes name strings and checks if they're reasonably similar.
+// Handles initials, middle names, name-order differences.
+const namesMatch = (a: string, b: string): boolean => {
+  if (!a || !b) return true; // if either is missing, skip check (sandbox may return null)
+  const normalize = (s: string) =>
+    s.toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
+  const na = normalize(a);
+  const nb = normalize(b);
+  if (na === nb) return true;
+  // Check if all words of the shorter name appear in the longer (handles initials)
+  const wordsA = na.split(' ').filter(w => w.length > 1);
+  const wordsB = nb.split(' ').filter(w => w.length > 1);
+  const shorter = wordsA.length <= wordsB.length ? wordsA : wordsB;
+  const longer = wordsA.length <= wordsB.length ? wordsB : wordsA;
+  const matchCount = shorter.filter(w => longer.some(lw => lw.startsWith(w) || w.startsWith(lw))).length;
+  return matchCount >= Math.ceil(shorter.length * 0.6); // 60% word overlap
+};
+
+// ── DL Number Normalizer ───────────────────────────────────────────────────
+// Indian DL numbers: STATE_CODE + RTO_DISTRICT + YEAR + SERIAL
+// Valid formats: TG0120250003096, TG01 20250003096, TG-01-2025-0003096
+// VAHAN accepts the no-space/no-dash version: TG0120250003096
+const normalizeDlNumber = (dl: string): string => {
+  // Remove spaces and dashes, uppercase
+  return dl.toUpperCase().replace(/[\s\-]/g, '');
+};
+
 // ── Verify Missing Documents (PAN + DL) ────────────────────────────────────
 export const verifyMissingDocumentsFallback = async (
   userId: string,
@@ -224,10 +252,24 @@ export const verifyMissingDocumentsFallback = async (
     try {
       const panResult = await verifyPanStandalone(input.panNumber);
       if (panResult.valid) {
-        updateData.panVerified = true;
-        updateData.panNumber = input.panNumber.toUpperCase();
-        updateData.panName = panResult.registeredName;
-        updateData.panSource = KycDocumentSource.STANDALONE_API;
+        const panName = panResult.registeredName;
+        const aadhaarName = kyc.aadhaarName || '';
+        const isProduction = process.env.SUREPASS_ENV === 'PRODUCTION';
+
+        // Name cross-validation: PAN must belong to same person as Aadhaar
+        // Only enforced in production — sandbox APIs may return null/mismatched names
+        if (isProduction && aadhaarName && panName && !namesMatch(aadhaarName, panName)) {
+          logger.warn('[KYC] PAN name mismatch with Aadhaar', { userId, aadhaarName, panName });
+          errors.push(
+            `PAN name "${panName}" does not match your Aadhaar name "${aadhaarName}". ` +
+            `Both documents must belong to the same person.`
+          );
+        } else {
+          updateData.panVerified = true;
+          updateData.panNumber = input.panNumber.toUpperCase();
+          updateData.panName = panName;
+          updateData.panSource = KycDocumentSource.STANDALONE_API;
+        }
       } else {
         errors.push(`PAN "${input.panNumber}" could not be verified. Please check the number and try again.`);
       }
@@ -239,59 +281,81 @@ export const verifyMissingDocumentsFallback = async (
 
   // Verify DL if not already done
   if (!kyc.dlVerified && input.dlNumber) {
+    // Normalize DL number — remove spaces/dashes (VAHAN expects no separators)
+    const normalizedDl = normalizeDlNumber(input.dlNumber);
+
     // Use DOB from Aadhaar first, then from user input
     let dobStr: string | null = null;
-
     if (kyc.aadhaarDob) {
       dobStr = kyc.aadhaarDob.toISOString().split('T')[0]; // YYYY-MM-DD
     } else if (input.dob) {
       dobStr = input.dob;
       const parsed = new Date(input.dob);
-      if (!isNaN(parsed.getTime())) {
-        updateData.aadhaarDob = parsed;
-      }
+      if (!isNaN(parsed.getTime())) updateData.aadhaarDob = parsed;
     }
 
     if (!dobStr) {
       errors.push('Date of birth is required to verify your Driving License. Please provide your DOB.');
     } else {
       try {
-        const dlResult = await verifyDrivingLicenseStandalone(input.dlNumber, dobStr);
+        const dlResult = await verifyDrivingLicenseStandalone(normalizedDl, dobStr);
         if (dlResult.valid) {
-          updateData.dlVerified = true;
-          updateData.dlNumber = input.dlNumber.toUpperCase();
-          updateData.dlName = dlResult.name;
-          updateData.dlVehicleClass = Array.isArray(dlResult.vehicleClass)
-            ? dlResult.vehicleClass.join(', ')
-            : String(dlResult.vehicleClass);
-          updateData.dlSource = KycDocumentSource.STANDALONE_API;
-          updateData.cashfreeResponse = dlResult.rawResponse;
+          const dlName = dlResult.name;
+          const aadhaarName = kyc.aadhaarName || '';
+          const isProduction = process.env.SUREPASS_ENV === 'PRODUCTION';
 
-          if (dlResult.expiryDate) {
-            // Parse DD-MM-YYYY or YYYY-MM-DD
-            let expiryStr = dlResult.expiryDate;
-            if (/^\d{2}-\d{2}-\d{4}$/.test(expiryStr)) {
-              const [d, m, y] = expiryStr.split('-');
-              expiryStr = `${y}-${m}-${d}`;
+          // Name cross-validation: DL must belong to same person as Aadhaar
+          // Only enforced in production — sandbox may return null names
+          if (isProduction && aadhaarName && dlName && !namesMatch(aadhaarName, dlName)) {
+            logger.warn('[KYC] DL name mismatch with Aadhaar', { userId, aadhaarName, dlName });
+            errors.push(
+              `Driving License name "${dlName}" does not match your Aadhaar name "${aadhaarName}". ` +
+              `All documents must belong to the same person.`
+            );
+          } else {
+            updateData.dlVerified = true;
+            updateData.dlNumber = normalizedDl;
+            updateData.dlName = dlName;
+            updateData.dlVehicleClass = Array.isArray(dlResult.vehicleClass)
+              ? dlResult.vehicleClass.join(', ')
+              : String(dlResult.vehicleClass);
+            updateData.dlSource = KycDocumentSource.STANDALONE_API;
+            updateData.cashfreeResponse = dlResult.rawResponse;
+
+            if (dlResult.expiryDate) {
+              let expiryStr = dlResult.expiryDate;
+              if (/^\d{2}-\d{2}-\d{4}$/.test(expiryStr)) {
+                const [d, m, y] = expiryStr.split('-');
+                expiryStr = `${y}-${m}-${d}`;
+              }
+              const parsed = new Date(expiryStr);
+              if (!isNaN(parsed.getTime())) updateData.dlExpiryDate = parsed;
             }
-            const parsed = new Date(expiryStr);
-            if (!isNaN(parsed.getTime())) updateData.dlExpiryDate = parsed;
-          }
-          if (dlResult.dob) {
-            let dobParse = dlResult.dob;
-            if (/^\d{2}-\d{2}-\d{4}$/.test(dobParse)) {
-              const [d, m, y] = dobParse.split('-');
-              dobParse = `${y}-${m}-${d}`;
+            if (dlResult.dob) {
+              let dobParse = dlResult.dob;
+              if (/^\d{2}-\d{2}-\d{4}$/.test(dobParse)) {
+                const [d, m, y] = dobParse.split('-');
+                dobParse = `${y}-${m}-${d}`;
+              }
+              const parsed = new Date(dobParse);
+              if (!isNaN(parsed.getTime())) updateData.dlDob = parsed;
             }
-            const parsed = new Date(dobParse);
-            if (!isNaN(parsed.getTime())) updateData.dlDob = parsed;
           }
         } else {
-          errors.push(`Driving License "${input.dlNumber}" is invalid or does not match your date of birth.`);
+          errors.push(`Driving License "${normalizedDl}" is invalid or does not match your date of birth.`);
         }
       } catch (e: any) {
-        logger.error('[KYC] DL verification API error', { error: e.message, dlNumber: input.dlNumber?.slice(0, 4) + '***' });
-        errors.push(`DL verification failed: ${e.message}`);
+        logger.error('[KYC] DL verification API error', { error: e.message, dlNumber: normalizedDl?.slice(0, 4) + '***' });
+        const isNotFound = e.message?.includes('Verification Failed') || e.message?.includes('422');
+        if (isNotFound) {
+          errors.push(
+            `DL "${normalizedDl}" not found in VAHAN database. ` +
+            `Check: number is correct (no spaces/dashes), DOB matches your physical DL. ` +
+            `Example format: TG0120250003096`
+          );
+        } else {
+          errors.push(`DL verification failed: ${e.message}`);
+        }
       }
     }
   }
@@ -509,6 +573,9 @@ export const getKycStatus = async (userId: string) => {
     failureReason: kyc.failureReason,
     digilockerUrl: kyc.digilockerUrl,
     digilockerUrlExpiresAt: kyc.digilockerUrlExpiresAt?.toISOString() || null,
+    // Expose Aadhaar DOB so mobile can pre-fill the DL DOB field
+    aadhaarDob: kyc.aadhaarDob ? kyc.aadhaarDob.toISOString().split('T')[0] : null,
+    aadhaarName: kyc.aadhaarName || null,
   };
 };
 
