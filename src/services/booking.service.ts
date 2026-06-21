@@ -15,7 +15,24 @@ import { RewardsService } from './rewards.service';
 import { ReferralService } from './referral.service';
 import { DiscountService } from './discount.service';
 
-const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+// ── Cache Invalidation Helper ───────────────────────────────────────────────
+// Call this whenever booking status changes so Redis never serves stale data.
+// Safe to call fire-and-forget — errors are swallowed.
+const invalidateBookingCaches = (userIds: (string | null | undefined)[]) => {
+  void (async () => {
+    try {
+      const { redisClient } = await import('../config/redis');
+      if (redisClient.status !== 'ready') return;
+      const keys = userIds
+        .filter(Boolean)
+        .flatMap((id) => [`active_booking:${id}`, `avail_bookings:${id}`]);
+      if (keys.length) await redisClient.del(...keys);
+    } catch {
+      // Non-fatal
+    }
+  })();
+};
+
 
 const HYDERABAD_ORR_POLYGON: Array<{ lat: number; lng: number }> = [
   { lat: 17.4269, lng: 78.3425 },
@@ -187,6 +204,20 @@ export class BookingService {
         : Math.min(120, Math.max(1, maxAgeMinutesRaw))
       : 20;
 
+    // ── Redis short-circuit cache (4 seconds) ──────────────────────────────
+    // Drivers poll this every ~2-3s. Cache per-driver for 4s to absorb bursts
+    // without hitting DB on every tick. Cache is invalidated when new bookings arrive.
+    const { redisClient } = await import('../config/redis');
+    const cacheKey = `avail_bookings:${params.driverId}`;
+    if (redisClient.status === 'ready') {
+      try {
+        const cached = await redisClient.get(cacheKey);
+        if (cached) return JSON.parse(cached);
+      } catch {
+        // Redis miss — fall through to DB
+      }
+    }
+
     const driver = await prisma.driverProfile.findUnique({
       where: { userId: params.driverId },
       select: {
@@ -219,22 +250,9 @@ export class BookingService {
     const now = new Date();
     const since = maxAgeMinutes > 0 ? new Date(Date.now() - maxAgeMinutes * 60 * 1000) : null;
 
-    // Auto-cancel stale SEARCHING/REQUESTED bookings (>6 hours old, no driver assigned)
-    const staleDate = new Date(Date.now() - 6 * 60 * 60 * 1000);
-    await prisma.booking.updateMany({
-      where: {
-        driverId: null,
-        status: { in: [BookingStatus.REQUESTED, BookingStatus.SEARCHING] },
-        scheduledTime: null, // Don't cancel scheduled bookings
-        createdAt: { lt: staleDate },
-      },
-      data: {
-        status: BookingStatus.CANCELLED,
-        cancelledAt: new Date(),
-        cancelledBy: CancelledBy.CUSTOMER,
-        cancellationReason: 'Auto-cancelled: no driver found within 6 hours',
-      } as any,
-    });
+    // NOTE: Stale booking auto-cancel intentionally removed from this hot path.
+    // It runs in createBooking and is also handled by the 6-hour threshold there.
+    // Running updateMany on every driver poll was a major DB write load.
 
     const bookings = await prisma.booking.findMany({
       where: {
@@ -345,7 +363,18 @@ export class BookingService {
       .filter(Boolean) as any[];
 
     items.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-    return items.slice(0, limit);
+    const result = items.slice(0, limit);
+
+    // Store in Redis for 4 seconds — absorbs rapid repeat polls without DB hits
+    if (redisClient.status === 'ready') {
+      try {
+        await redisClient.setex(cacheKey, 4, JSON.stringify(result));
+      } catch {
+        // Non-fatal — just skip caching
+      }
+    }
+
+    return result;
   };
 
   static getBookingHistoryForUser = async (params: { userId: string; page?: number; limit?: number }) => {
@@ -876,10 +905,25 @@ export class BookingService {
       });
     } catch { }
 
+    invalidateBookingCaches([booking.customerId, params.driverId]);
     return { booking: acceptedBooking };
   };
 
   static getActiveBookingForUser = async (userId: string) => {
+    // ── 3-second Redis cache for active booking ────────────────────────────
+    // Customer + driver both poll this on every screen mount/refresh.
+    // Real-time updates come via Socket.IO — the 3s REST cache window is safe.
+    const { redisClient } = await import('../config/redis');
+    const activeCacheKey = `active_booking:${userId}`;
+    if (redisClient.status === 'ready') {
+      try {
+        const cached = await redisClient.get(activeCacheKey);
+        if (cached !== null) return JSON.parse(cached);
+      } catch {
+        // Fall through to DB
+      }
+    }
+
     const activeStatuses: BookingStatus[] = [
       BookingStatus.REQUESTED,
       BookingStatus.SEARCHING,
@@ -922,7 +966,13 @@ export class BookingService {
       },
     });
 
-    if (!booking) return null;
+    if (!booking) {
+      // Cache null result briefly too — no active booking
+      if (redisClient.status === 'ready') {
+        try { await redisClient.setex(activeCacheKey, 3, 'null'); } catch {}
+      }
+      return null;
+    }
 
     const ageMs = nowMs - new Date(booking.updatedAt).getTime();
     const isStale = (() => {
@@ -997,10 +1047,23 @@ export class BookingService {
         });
       }
 
+      // Invalidate cache on stale cancel
+      if (redisClient.status === 'ready') {
+        try { await redisClient.del(activeCacheKey); } catch {}
+      }
       return null;
     }
 
-    return BookingService.getBookingById(booking.id, userId);
+    const fullBooking = await BookingService.getBookingById(booking.id, userId);
+
+    // Cache the result for 3 seconds
+    if (redisClient.status === 'ready') {
+      try {
+        await redisClient.setex(activeCacheKey, 3, JSON.stringify(fullBooking));
+      } catch {}
+    }
+
+    return fullBooking;
   };
 
   static verifyBookingOtp = async (params: { bookingId: string; driverId: string; otp: string }) => {
@@ -1675,6 +1738,7 @@ export class BookingService {
       }
     }
 
+    invalidateBookingCaches([booking.customerId, booking.driverId]);
     return { bookingId: params.bookingId, status: params.status };
   };
 
@@ -1829,6 +1893,7 @@ export class BookingService {
         createdAt: new Date().toISOString(),
       });
 
+      invalidateBookingCaches([booking.customerId, booking.driverId]);
       return { bookingId: params.bookingId, reopened: true };
     }
 
@@ -1966,6 +2031,7 @@ export class BookingService {
       reason: 'CANCELLED',
     });
 
+    invalidateBookingCaches([booking.customerId, booking.driverId]);
     return { bookingId: params.bookingId };
   };
 

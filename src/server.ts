@@ -94,15 +94,23 @@ app.use(cors({
   credentials: true,
 }));
 app.use(compression());
-app.use(
+// Large body limit ONLY for KYC selfie route (base64 images ~2-4MB)
+// All other routes get 5mb max to prevent memory spikes from malicious payloads
+app.post(
+  /\/kyc\/selfie/,
   express.json({
     limit: '50mb',
-    verify: (req: any, _res, buf) => {
-      req.rawBody = buf;
-    },
+    verify: (req: any, _res, buf) => { req.rawBody = buf; },
   })
 );
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(
+  express.json({
+    limit: '5mb',
+    verify: (req: any, _res, buf) => { req.rawBody = buf; },
+  })
+);
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+
 
 if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
@@ -312,7 +320,7 @@ const startServer = async () => {
       logger.error('Failed to start scheduled booking processor:', error);
     });
 
-    // Seed default driver badges
+    // Seed default driver badges — runs once per server process only
     void (async () => {
       try {
         const { BadgeService } = await import('./services/badge.service');

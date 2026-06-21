@@ -492,7 +492,22 @@ model Booking {
   @@index([bookingType])
   @@index([scheduledTime])
   @@index([createdAt])
+  @@index([updatedAt])
   @@index([pickupLocationLat, pickupLocationLng])
+
+  // ── Composite indexes: match actual hot query WHERE clauses ────────────────
+  // getActiveBookingForUser: WHERE customerId=? AND status IN (...)
+  @@index([customerId, status])
+  // getActiveBookingForUser / acceptBooking: WHERE driverId=? AND status IN (...)
+  @@index([driverId, status])
+  // listAvailableBookingsForDriver: WHERE driverId IS NULL AND status IN (...) AND scheduledTime
+  @@index([driverId, status, scheduledTime])
+  // createBooking stale-cancel: WHERE customerId=? AND status IN (...) AND createdAt < threshold
+  @@index([customerId, status, createdAt])
+  // booking history paginated: ORDER BY createdAt DESC per user
+  @@index([customerId, createdAt])
+  @@index([driverId, createdAt])
+
   @@map("bookings")
 }
 

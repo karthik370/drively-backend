@@ -122,6 +122,25 @@ const startCronFallback = () => {
 
   cron.schedule('*/1 * * * *', async () => {
     try {
+      // Skip DB query if Bull queue is healthy — cron is fallback only
+      // This prevents unnecessary DB load when the queue is processing jobs normally
+      if (queue) {
+        try {
+          const [waiting, active] = await Promise.all([
+            queue.getWaitingCount(),
+            queue.getActiveCount(),
+          ]);
+          // If queue is processing, it will handle due jobs — skip DB poll
+          if (waiting === 0 && active === 0) {
+            // Queue is idle — still check DB in case a job was missed
+          } else {
+            return; // Queue is active, let it work
+          }
+        } catch {
+          // Queue health check failed — fall through to DB poll as safety net
+        }
+      }
+
       const now = new Date();
       const due = await prisma.booking.findMany({
         where: {
