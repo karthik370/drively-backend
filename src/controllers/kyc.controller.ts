@@ -159,27 +159,49 @@ export class KycController {
       throw new AppError('Invalid mimeType for selfie', 400);
     }
 
-    // Upload selfie to Cloudinary first
-    let selfieUrl: string;
-    try {
-      const folder = `drivemate/${req.user.id}/kyc-selfie`;
-      const publicId = `selfie_${Date.now()}`;
+    // Run face match first using raw base64 — DO NOT upload to Cloudinary yet
+    // selfieUrl is temporarily a data URI; Cloudinary upload only happens on success
+    const tempSelfieRef = `data:${mime};base64,${base64}`;
+    const result = await submitSelfieAndFaceMatch(req.user.id, tempSelfieRef, base64);
 
-      logger.info('[KYC] Uploading selfie to Cloudinary', { folder, publicId, cloudName: process.env.CLOUDINARY_CLOUD_NAME });
+    // Only upload to Cloudinary if face match PASSED and KYC is completed
+    // This prevents unverified photos from polluting the driver's profile
+    if (result.kycCompleted) {
+      try {
+        const folder = `drivemate/${req.user.id}/kyc-selfie`;
+        const publicId = `selfie_${Date.now()}`;
 
-      const uploadResult = await cloudinary.uploader.upload(
-        `data:${mime};base64,${base64}`,
-        { folder, public_id: publicId, resource_type: 'image', overwrite: true }
-      );
-      selfieUrl = uploadResult.secure_url;
-      logger.info('[KYC] Selfie uploaded to Cloudinary', { url: selfieUrl });
-    } catch (err: any) {
-      logger.error('[KYC] Selfie upload to Cloudinary failed', { error: err?.message, cloudName: process.env.CLOUDINARY_CLOUD_NAME });
-      throw new AppError(`Failed to upload selfie: ${err?.message}`, 502);
+        logger.info('[KYC] Face match passed — uploading verified selfie to Cloudinary', {
+          folder,
+          publicId,
+          cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+        });
+
+        const uploadResult = await cloudinary.uploader.upload(
+          `data:${mime};base64,${base64}`,
+          { folder, public_id: publicId, resource_type: 'image', overwrite: true }
+        );
+        const selfieUrl = uploadResult.secure_url;
+        logger.info('[KYC] Verified selfie uploaded to Cloudinary', { url: selfieUrl });
+
+        // Update profile image now that we have the permanent Cloudinary URL
+        await import('../config/database').then(({ default: prisma }) =>
+          prisma.user.update({
+            where: { id: req.user!.id },
+            data: { profileImage: selfieUrl },
+          })
+        );
+        logger.info('[KYC] Driver profile image updated with verified selfie', { userId: req.user.id });
+      } catch (err: any) {
+        // Non-fatal — KYC is still completed, profile image can be set later
+        logger.error('[KYC] Cloudinary upload failed after face match', { error: err?.message });
+      }
+    } else {
+      logger.info('[KYC] Face match failed — selfie NOT uploaded to Cloudinary', {
+        userId: req.user.id,
+        faceMatchScore: result.faceMatchScore,
+      });
     }
-
-    // Run face match
-    const result = await submitSelfieAndFaceMatch(req.user.id, selfieUrl, base64);
 
     res.status(200).json({
       success: true,
