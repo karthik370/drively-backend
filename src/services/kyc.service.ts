@@ -284,14 +284,13 @@ export const verifyMissingDocumentsFallback = async (
     // Normalize DL number — remove spaces/dashes (VAHAN expects no separators)
     const normalizedDl = normalizeDlNumber(input.dlNumber);
 
-    // Use DOB from Aadhaar first, then from user input
+    // DOB priority: user-entered input first, Aadhaar DOB as fallback only
+    // The user knows their DL's DOB — it may differ from Aadhaar in edge cases
     let dobStr: string | null = null;
-    if (kyc.aadhaarDob) {
-      dobStr = kyc.aadhaarDob.toISOString().split('T')[0]; // YYYY-MM-DD
-    } else if (input.dob) {
-      dobStr = input.dob;
-      const parsed = new Date(input.dob);
-      if (!isNaN(parsed.getTime())) updateData.aadhaarDob = parsed;
+    if (input.dob) {
+      dobStr = input.dob; // always prefer what user explicitly typed
+    } else if (kyc.aadhaarDob) {
+      dobStr = kyc.aadhaarDob.toISOString().split('T')[0]; // YYYY-MM-DD fallback
     }
 
     if (!dobStr) {
