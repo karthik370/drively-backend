@@ -33,6 +33,7 @@ const invalidateBookingCaches = (userIds: (string | null | undefined)[]) => {
   })();
 };
 
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
 const HYDERABAD_ORR_POLYGON: Array<{ lat: number; lng: number }> = [
   { lat: 17.4269, lng: 78.3425 },
