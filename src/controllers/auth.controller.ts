@@ -10,6 +10,7 @@ import axios from 'axios';
 import { logger } from '../utils/logger';
 import jwt from 'jsonwebtoken';
 import { ReferralService } from '../services/referral.service';
+import { sendExpoPushNotification } from '../services/expoPush.service';
 
 const normalizePhoneE164 = (raw: string): string => {
   const trimmed = String(raw || '').trim();
@@ -405,6 +406,20 @@ export class AuthController {
           userId: result.user.id, referralCode, error: e?.message,
         });
       }
+    }
+
+    // ── One-time welcome notification (fire-and-forget, never delays signup response) ──
+    // Only sent once at account creation. Opening the app later does NOT resend it.
+    if (result?.user?.id) {
+      const firstName = String((result.user as any)?.firstName || 'there').trim();
+      void sendExpoPushNotification({
+        userIds: [result.user.id],
+        title: `Welcome to Drively, ${firstName}! 🎉`,
+        body: `Thanks for choosing Drively! You're all set to book your first ride. Share the app with friends and family — quality rides, wherever you go.`,
+        data: { kind: 'welcome' },
+      }).catch((err) => {
+        logger.warn('Failed to send welcome notification', { userId: result.user.id, error: err?.message });
+      });
     }
 
     res.status(201).json({
