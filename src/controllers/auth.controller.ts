@@ -160,7 +160,7 @@ const generateOtpSignupToken = (payload: { identifierRaw: string; phoneNumber?: 
       email: payload.email || null,
     },
     secret,
-    { expiresIn: '15m' }
+    { expiresIn: '60m' }  // 60 min: user must traverse OTP → UserType → Signup form
   );
 };
 
