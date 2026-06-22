@@ -2096,47 +2096,50 @@ export class BookingService {
     // Also fetch totalTrips by counting completed bookings (driverProfile may not exist for all drivers)
     if ((booking as any).driver?.id) {
       const driverId = (booking as any).driver.id;
+      // Always fetch the actual trip count — stored counter may be 0 for older drivers
+      // who completed trips before the increment logic was added.
       try {
-        const [driverBadges, completedTripsCount] = await Promise.all([
-          prisma.driverBadge.findMany({
-            where: {
-              driverId,
-              badge: { isActive: true },
-            },
-            orderBy: { earnedAt: 'desc' },
-            take: 3,
-            select: {
-              earnedAt: true,
-              quizScore: true,
-              badge: {
-                select: {
-                  id: true,
-                  title: true,
-                  icon: true,
-                  color: true,
-                  category: true,
-                },
-              },
-            },
-          }),
-          prisma.booking.count({
-            where: {
-              driverId,
-              status: BookingStatus.COMPLETED,
-            },
-          }),
-        ]);
-        (booking as any).driver.driverBadges = driverBadges;
-        // Attach totalTrips to driver (works even if driverProfile is null)
+        const completedTripsCount = await prisma.booking.count({
+          where: { driverId, status: BookingStatus.COMPLETED },
+        });
         if (!(booking as any).driver.driverProfile) {
           (booking as any).driver.driverProfile = { totalTrips: completedTripsCount };
         } else {
           (booking as any).driver.driverProfile.totalTrips = completedTripsCount;
         }
-      } catch {
+      } catch (countErr) {
+        logger.warn('Failed to count completed trips for driver profile', { driverId, error: countErr });
+      }
+      // Fetch earned quiz badges — separate try/catch so a badge error doesn't lose the trip count
+      try {
+        const driverBadges = await prisma.driverBadge.findMany({
+          where: {
+            driverId,
+            badge: { isActive: true },
+          },
+          orderBy: { earnedAt: 'desc' },
+          take: 3,
+          select: {
+            earnedAt: true,
+            quizScore: true,
+            badge: {
+              select: {
+                id: true,
+                title: true,
+                icon: true,
+                color: true,
+                category: true,
+              },
+            },
+          },
+        });
+        (booking as any).driver.driverBadges = driverBadges;
+      } catch (badgeErr) {
+        logger.warn('Failed to fetch driver badges', { driverId, error: badgeErr });
         (booking as any).driver.driverBadges = [];
       }
     }
+
 
     (booking as any).customerRating = (booking as any).customerRating ?? null;
     (booking as any).customerReview = (booking as any).customerReview ?? null;

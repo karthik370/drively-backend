@@ -116,23 +116,16 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
   <meta property="og:url" content="${baseUrl}/track/${shareToken}">
   <meta property="og:site_name" content="Drively">
 
-  <!-- Smart deep link: try to open app, fall back to web page -->
+  <!-- Smart deep link: show app banner on mobile, don't auto-redirect -->
   <script>
     (function() {
-      var deepLink = 'drively://track/${shareToken}';
       var isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
       if (isMobile) {
-        // Try to open app
-        var appOpened = false;
-        var t = setTimeout(function() {
-          if (!appOpened) {
-            // App not installed or failed — stay on web page
-            document.getElementById('webFallback') && (document.getElementById('webFallback').style.display = 'block');
-          }
-        }, 1500);
-        // Listen for blur = app opened successfully
-        window.addEventListener('blur', function() { appOpened = true; clearTimeout(t); });
-        window.location.href = deepLink;
+        // Show the sticky "open in app" banner instead of forcing a redirect
+        document.addEventListener('DOMContentLoaded', function() {
+          var banner = document.getElementById('appBanner');
+          if (banner) banner.style.display = 'flex';
+        });
       }
     })();
   </script>
@@ -436,6 +429,29 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
       color: var(--text-muted);
       padding-bottom: 4px;
     }
+
+    /* ── Mobile App Banner ──────────────────────── */
+    #appBanner {
+      display: none; /* shown by JS on mobile only */
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: linear-gradient(135deg, rgba(201,168,76,0.12), rgba(201,168,76,0.04));
+      border-bottom: 1px solid rgba(201,168,76,0.2);
+      gap: 12px;
+    }
+    #appBanner .banner-text { flex: 1; font-size: 13px; color: var(--text-secondary); line-height: 1.4; }
+    #appBanner .banner-text strong { color: var(--text-primary); }
+    #appBanner .banner-open {
+      background: var(--gold); color: #0A0A0A; border: none;
+      padding: 9px 18px; border-radius: 10px; font-weight: 800;
+      font-size: 13px; cursor: pointer; text-decoration: none;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    #appBanner .banner-dismiss {
+      background: none; border: none; color: var(--text-muted);
+      font-size: 22px; cursor: pointer; padding: 4px; line-height: 1;
+    }
   </style>
 </head>
 <body>
@@ -446,6 +462,13 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
       <span>Drively</span>
     </div>
     <a class="open-app" href="${appScheme}://track/${shareToken}" id="openAppBtn">Open in App</a>
+  </div>
+
+  <!-- Mobile: sticky "Open in App" banner (shown only by JS when mobile UA detected) -->
+  <div id="appBanner">
+    <div class="banner-text"><strong>Drively App</strong> gives you live tracking with voice updates</div>
+    <a class="banner-open" href="drively://track/${shareToken}">Open App</a>
+    <button class="banner-dismiss" onclick="document.getElementById('appBanner').style.display='none'" aria-label="Dismiss">×</button>
   </div>
 
   <!-- Map: Static image loads immediately, JS interactive map replaces it if key works -->
@@ -833,13 +856,19 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     // Permissive CSP for this public share page — needs Google Maps, Cloudinary, inline scripts
+    const cspConnectSrc = [
+      "'self'",
+      'https://maps.googleapis.com',
+      baseUrl,  // include dynamic API URL so polling works on all deployments
+      'https://v2.kurnm.click',
+    ].filter((v, i, a) => a.indexOf(v) === i).join(' ');
     res.setHeader('Content-Security-Policy',
       "default-src 'self'; " +
       "script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com https://fonts.googleapis.com; " +
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; " +
       "img-src 'self' data: blob: https://maps.googleapis.com https://maps.gstatic.com https://res.cloudinary.com https://khms0.googleapis.com https://khms1.googleapis.com https://khms0.google.com https://khms1.google.com https://cbks0.googleapis.com https://cbks1.googleapis.com; " +
-      "font-src 'self' https://fonts.gstatic.com; " +
-      "connect-src 'self' https://maps.googleapis.com https://v2.kurnm.click; " +
+      `font-src 'self' https://fonts.gstatic.com; ` +
+      `connect-src ${cspConnectSrc}; ` +
       "frame-src 'none';"
     );
     res.send(html);
