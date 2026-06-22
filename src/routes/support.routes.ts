@@ -7,8 +7,7 @@ const router = Router();
 router.get('/threads', authenticate, SupportController.listThreads);
 router.get('/threads/:bookingId/messages', authenticate, SupportController.listMessages);
 
-router.post('/tickets', authenticate, (_req, res) => {
-  res.json({ success: true, message: 'Support routes - To be implemented' });
-});
+// Onboarding support — driver calls this to open a support ticket during KYC/verification
+router.post('/onboarding-ticket', authenticate, SupportController.createOnboardingTicket);
 
 export default router;
