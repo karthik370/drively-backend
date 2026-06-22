@@ -145,6 +145,48 @@ if (process.env.NODE_ENV === 'development') {
   app.use(morgan('combined', { stream: { write: (message) => logger.info(message.trim()) } }));
 }
 
+// ─── SECURITY: PHP webshell probe blocker ────────────────────────────────────
+// Immediately drop requests for *.php paths — this server runs Node.js and
+// will NEVER serve PHP files. These are automated scanners (CVE probers,
+// webshell droppers, WordPress backdoor scanners).
+// Returns 404 with no body and logs a single warn per unique IP per session.
+const phpProbeIpsSeen = new Set<string>();
+app.use((req, res, next) => {
+  if (req.path.toLowerCase().endsWith('.php')) {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    if (!phpProbeIpsSeen.has(ip)) {
+      phpProbeIpsSeen.add(ip);
+      logger.warn('PHP probe blocked', { ip, path: req.path, ua: req.headers['user-agent'] });
+    }
+    res.status(404).end();
+    return;
+  }
+  next();
+});
+
+// ─── SECURITY: Non-API path rate limiter ─────────────────────────────────────
+// Catches scanner bots probing arbitrary paths outside /api/, /track/, /health.
+// 20 requests per minute per IP — well above any legitimate browser/app but
+// stops automated path scanners cold.
+const unknownPathLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: 'Too many requests.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    const p = req.path;
+    return (
+      p.startsWith('/api/') ||
+      p.startsWith('/track/') ||
+      p === '/track' ||
+      p === '/health' ||
+      p === '/'
+    );
+  },
+});
+app.use(unknownPathLimiter);
+
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'),
