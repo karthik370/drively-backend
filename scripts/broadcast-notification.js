@@ -24,12 +24,13 @@ const prisma = new PrismaClient();
 // ─────────────────────────────────────────────────────────────────
 
 const NOTIFICATION = {
-  title: '🎉 MG',        // ← notification title
-  body: 'EP', // ← notification body / message
+  title: `Welcome to Drively! 🎉`,
+  body: `Thanks for choosing Drively! You're all set to book your first ride. Share the app with friends — quality rides, wherever you go.`,
   data: {                                           // ← optional extra data (opens a screen)
     screen: 'Home',                                 //    e.g. 'Home', 'Wallet', 'Offers'
     type: 'broadcast',
   },
+  
 };
 
 // WHO to send to:

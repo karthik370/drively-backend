@@ -48,14 +48,14 @@ const getOneWayCharge = (distanceKm: number): number => {
 const getLocalPackage = (hours: number) => {
   const h = clamp(Math.round(hours), 1, 8);
   const priceByHour: Record<number, number> = {
-    1: 309,
-    2: 374,
-    3: 502,
-    4: 631,
-    5: 759,
-    6: 899,
-    7: 1019,
-    8: 1149,
+    1: 319,
+    2: 384,
+    3: 512,
+    4: 641,
+    5: 769,
+    6: 909,
+    7: 1029,
+    8: 1159,
   };
 
   return { hours: h, price: priceByHour[h] ?? 300 };
@@ -112,14 +112,14 @@ export const computeFare = (params: {
       const selectedHours = clamp(Math.round(selectedHoursRaw ?? actualHours), 12, 120);
 
       const priceByHour: Record<number, number> = {
-        12: 1199,
-        16: 1439,
-        20: 1679,
-        24: 1919,
-        48: 3359,
-        72: 4799,
-        96: 6239,
-        120: 7679,
+        12: 1499,
+        16: 1739,
+        20: 1979,
+        24: 2219,
+        48: 3659,
+        72: 5099,
+        96: 6539,
+        120: 7979,
       };
 
       const allowed = Object.keys(priceByHour)
@@ -171,8 +171,12 @@ export const computeFare = (params: {
     const oneWayDistanceThresholdKm = 200;
     const oneWayDistanceRate = 6;
 
-    const selectedHours = clamp(Math.round(selectedHoursRaw ?? actualHours), 12, 18);
+    const selectedHours = clamp(Math.round(selectedHoursRaw ?? actualHours), 4, 18);
     const priceByHour: Record<number, number> = {
+      4: 1800,
+      6: 1800,
+      8: 1800,
+      10: 1800,
       12: 1800,
       14: 1999,
       16: 2199,
