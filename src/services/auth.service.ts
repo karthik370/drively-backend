@@ -151,11 +151,19 @@ export class AuthService {
         isVerified: user.isVerified,
       });
 
-      await tx.session.create({
-        data: {
+      // Use upsert to handle concurrent login calls (same JWT iat = same refreshToken)
+      await tx.session.upsert({
+        where: { refreshToken },
+        create: {
           userId: user.id,
           refreshToken,
           expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        },
+        update: {
+          userId: user.id,
+          isValid: true,
+          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+          lastUsedAt: new Date(),
         },
       });
 
@@ -218,11 +226,19 @@ export class AuthService {
       isVerified: user.isVerified,
     });
 
-    await prisma.session.create({
-      data: {
+    // Use upsert to handle concurrent login calls (same JWT iat = same refreshToken)
+    await prisma.session.upsert({
+      where: { refreshToken },
+      create: {
         userId: user.id,
         refreshToken,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      },
+      update: {
+        userId: user.id,
+        isValid: true,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        lastUsedAt: new Date(),
       },
     });
 
@@ -379,11 +395,19 @@ export class AuthService {
       isVerified: user.isVerified,
     });
 
-    await prisma.session.create({
-      data: {
+    // Use upsert to handle concurrent login calls (same JWT iat = same refreshToken)
+    await prisma.session.upsert({
+      where: { refreshToken },
+      create: {
         userId: user.id,
         refreshToken,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      },
+      update: {
+        userId: user.id,
+        isValid: true,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        lastUsedAt: new Date(),
       },
     });
 
@@ -490,11 +514,19 @@ export class AuthService {
       isVerified: user.isVerified,
     });
 
-    await prisma.session.create({
-      data: {
+    // Use upsert to handle concurrent login calls (same JWT iat = same refreshToken)
+    await prisma.session.upsert({
+      where: { refreshToken },
+      create: {
         userId: user.id,
         refreshToken,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      },
+      update: {
+        userId: user.id,
+        isValid: true,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        lastUsedAt: new Date(),
       },
     });
 

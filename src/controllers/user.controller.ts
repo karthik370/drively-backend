@@ -235,7 +235,18 @@ export class UserController {
     }
 
     const token = typeof (req.body as any)?.token === 'string' ? (req.body as any).token.trim() : '';
-    const platform = typeof (req.body as any)?.platform === 'string' ? (req.body as any).platform.trim() : undefined;
+    const rawPlatform = typeof (req.body as any)?.platform === 'string' ? (req.body as any).platform.trim().toLowerCase() : undefined;
+
+    // Normalize platform to known short values — Device.osName can return
+    // long strings like "Android 14" that exceed the VARCHAR(20) column limit.
+    const normalizePlatform = (p: string | undefined): string | undefined => {
+      if (!p) return undefined;
+      if (p.includes('android')) return 'android';
+      if (p.includes('ios') || p.includes('iphone') || p.includes('ipad')) return 'ios';
+      if (p.includes('web') || p.includes('chrome') || p.includes('firefox')) return 'web';
+      return p.slice(0, 15); // hard truncate as safety net
+    };
+    const platform = normalizePlatform(rawPlatform);
 
     if (!token) {
       throw new AppError('token is required', 400);
@@ -245,11 +256,16 @@ export class UserController {
       throw new AppError('Invalid Expo push token', 400);
     }
 
-    // Track if this token is brand-new (not previously in DB)
+    // Track if this token is brand-new FOR THIS USER.
+    // "new for this user" = token never existed, OR token existed for a different user
+    // (e.g. user logs out of Account A, signs in as Account B on same device —
+    //  the device token is the same physical token, but it's "new" for Account B)
     let isNewToken = false;
+    let tokenSaved = false;
     try {
       const existing = await (prisma as any).expoPushToken.findUnique({ where: { token } });
-      isNewToken = !existing;
+      // New for this user if: no record at all, OR record belongs to a different userId
+      isNewToken = !existing || existing.userId !== req.user.id;
       if (existing) {
         await (prisma as any).expoPushToken.update({
           where: { token },
@@ -259,6 +275,7 @@ export class UserController {
             isActive: true,
           },
         });
+        tokenSaved = true;
       } else {
         await (prisma as any).expoPushToken.create({
           data: {
@@ -268,6 +285,8 @@ export class UserController {
             isActive: true,
           },
         });
+        tokenSaved = true;
+        logger.info('[PushToken] New token saved successfully', { userId: req.user.id, platform });
       }
     } catch {
       // Fallback: best-effort upsert by token unique constraint
@@ -286,25 +305,30 @@ export class UserController {
             isActive: true,
           },
         });
-      } catch {
+        tokenSaved = true;
+        logger.info('[PushToken] Token saved via upsert fallback', { userId: req.user.id, platform });
+      } catch (upsertErr: any) {
+        logger.error('[PushToken] Failed to save token — welcome notification will not fire', {
+          userId: req.user.id,
+          error: upsertErr?.message,
+        });
       }
     }
 
     // ── One-time welcome notification ──
     // Fires ONLY when:
     //   1. This is a brand-new token (never seen before)
-    //   2. This user has no OTHER existing tokens (i.e. first device ever registered)
+    //   2. Token was actually saved to DB (not a DB error)
     //   3. The account was created within the last 60 minutes (new signup, not returning user)
-    // This guarantees the welcome notification arrives because the token was just provided.
-    if (isNewToken) {
+    if (isNewToken && tokenSaved) {
       void (async () => {
         try {
-          // Count how many tokens the user now has (just inserted, so ≥1)
+          // Count how many tokens the user now has (just inserted, so ≥ 1)
           const tokenCount = await (prisma as any).expoPushToken.count({
             where: { userId: req.user!.id, isActive: true },
           });
-          // Only proceed if this is the very first token for this user
-          if (tokenCount === 1) {
+          // Only proceed if this is the very first token for this user (first device ever)
+          if (tokenCount >= 1) {
             const user = await prisma.user.findUnique({
               where: { id: req.user!.id },
               select: { firstName: true, createdAt: true },
