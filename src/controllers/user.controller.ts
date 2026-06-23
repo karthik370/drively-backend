@@ -4,6 +4,8 @@ import prisma from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { AppError, asyncHandler } from '../middleware/errorHandler';
 import { UserType } from '@prisma/client';
+import { sendExpoPushNotification } from '../services/expoPush.service';
+import { logger } from '../utils/logger';
 
 type SavedAddress = {
   id: string;
@@ -243,8 +245,11 @@ export class UserController {
       throw new AppError('Invalid Expo push token', 400);
     }
 
+    // Track if this token is brand-new (not previously in DB)
+    let isNewToken = false;
     try {
       const existing = await (prisma as any).expoPushToken.findUnique({ where: { token } });
+      isNewToken = !existing;
       if (existing) {
         await (prisma as any).expoPushToken.update({
           where: { token },
@@ -283,6 +288,45 @@ export class UserController {
         });
       } catch {
       }
+    }
+
+    // ── One-time welcome notification ──
+    // Fires ONLY when:
+    //   1. This is a brand-new token (never seen before)
+    //   2. This user has no OTHER existing tokens (i.e. first device ever registered)
+    //   3. The account was created within the last 60 minutes (new signup, not returning user)
+    // This guarantees the welcome notification arrives because the token was just provided.
+    if (isNewToken) {
+      void (async () => {
+        try {
+          // Count how many tokens the user now has (just inserted, so ≥1)
+          const tokenCount = await (prisma as any).expoPushToken.count({
+            where: { userId: req.user!.id, isActive: true },
+          });
+          // Only proceed if this is the very first token for this user
+          if (tokenCount === 1) {
+            const user = await prisma.user.findUnique({
+              where: { id: req.user!.id },
+              select: { firstName: true, createdAt: true },
+            });
+            const ageMs = user?.createdAt ? Date.now() - new Date(user.createdAt).getTime() : Infinity;
+            const isNewAccount = ageMs < 60 * 60 * 1000; // within last 60 minutes
+            if (isNewAccount) {
+              const firstName = String(user?.firstName || 'there').trim();
+              // Send directly to this token (guaranteed to exist — just registered above)
+              await sendExpoPushNotification({
+                userIds: [req.user!.id],
+                title: `Welcome to Drively, ${firstName}! 🎉`,
+                body: `Thanks for choosing Drively! You're all set to book your first ride. Share the app with friends — quality rides, wherever you go.`,
+                data: { kind: 'welcome' },
+              });
+              logger.info('Sent welcome notification to new user', { userId: req.user!.id });
+            }
+          }
+        } catch (err: any) {
+          logger.warn('Failed to send welcome notification', { userId: req.user!.id, error: err?.message });
+        }
+      })();
     }
 
     res.status(200).json({
