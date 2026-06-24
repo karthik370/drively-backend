@@ -1,6 +1,6 @@
 import { BookingStatus, CancelledBy, PaymentMethod, PaymentStatus, Prisma, TransmissionType, VehicleType } from '@prisma/client';
 import prisma from '../config/database';
-import { randomInt } from 'crypto';
+
 import { AppError } from '../middleware/errorHandler';
 import { getSocketServer } from '../socket/io';
 import { logger } from '../utils/logger';
@@ -14,6 +14,7 @@ import { PromotionService } from './promotion.service';
 import { RewardsService } from './rewards.service';
 import { ReferralService } from './referral.service';
 import { DiscountService } from './discount.service';
+import { TripPhotoService } from './tripPhoto.service';
 
 // ── Cache Invalidation Helper ───────────────────────────────────────────────
 // Call this whenever booking status changes so Redis never serves stale data.
@@ -769,8 +770,6 @@ export class BookingService {
       throw new AppError('Booking is not available for acceptance', 409);
     }
 
-    const otp = String(randomInt(0, 1_000_000)).padStart(6, '0');
-
     const updated = await prisma.booking.updateMany({
       where: {
         id: params.bookingId,
@@ -781,7 +780,7 @@ export class BookingService {
         driverId: params.driverId,
         status: BookingStatus.ACCEPTED,
         acceptedAt: new Date(),
-        otp,
+        otp: null,
       } as any,
     });
 
@@ -872,7 +871,6 @@ export class BookingService {
     io.to(`user:${booking.customerId}`).emit('booking:accepted', {
       bookingId: params.bookingId,
       driverId: params.driverId,
-      otp,
       driver: driverUser,
       booking: acceptedBooking,
     });
@@ -891,17 +889,14 @@ export class BookingService {
       reason: 'ACCEPTED',
     });
 
-    // Push notification — send immediately so customer gets notified fast
     try {
-      const otpText = typeof otp === 'string' && otp.trim() ? `\n🔒 Your trip OTP: ${otp.trim()}` : '';
       await sendExpoPushNotification({
         userIds: [String(booking.customerId)],
         title: '🚗 Driver accepted your ride!',
-        body: `${driverUser?.firstName || 'Your driver'} is heading to your pickup location.${otpText}`,
+        body: `${driverUser?.firstName || 'Your driver'} is heading to your pickup location.`,
         data: {
           kind: 'booking_accepted',
           bookingId: String(params.bookingId),
-          otp: typeof otp === 'string' ? otp : '',
         },
       });
     } catch { }
@@ -1067,76 +1062,13 @@ export class BookingService {
     return fullBooking;
   };
 
-  static verifyBookingOtp = async (params: { bookingId: string; driverId: string; otp: string }) => {
-    const booking = await prisma.booking.findUnique({
-      where: { id: params.bookingId },
-      select: {
-        id: true,
-        customerId: true,
-        driverId: true,
-        status: true,
-        otp: true,
-      },
-    });
-
-    if (!booking) {
-      throw new AppError('Booking not found', 404);
-    }
-
-    if (!booking.driverId || booking.driverId !== params.driverId) {
-      throw new AppError('Not authorized for this booking', 403);
-    }
-
-    if (booking.status !== BookingStatus.ARRIVED) {
-      throw new AppError('OTP can be verified only after arriving at pickup', 409);
-    }
-
-    const expectedOtp = typeof booking.otp === 'string' ? booking.otp : null;
-    const providedOtp = String(params.otp || '').trim();
-
-    if (!expectedOtp) {
-      throw new AppError('OTP not available', 409);
-    }
-
-    if (expectedOtp !== providedOtp) {
-      throw new AppError('Invalid OTP', 400);
-    }
-
-    await prisma.booking.update({
-      where: { id: params.bookingId },
-      data: {
-        otp: null,
-      },
-    });
-
-    const started = await BookingService.updateBookingStatus({
-      bookingId: params.bookingId,
-      userId: params.driverId,
-      status: BookingStatus.STARTED,
-    });
-
-    const io = getSocketServer();
-    io.to(`booking:${params.bookingId}`).emit('booking:otp-verified', {
-      bookingId: params.bookingId,
-    });
-    io.to(`user:${booking.customerId}`).emit('booking:otp-verified', {
-      bookingId: params.bookingId,
-    });
-    io.to(`user:${params.driverId}`).emit('booking:otp-verified', {
-      bookingId: params.bookingId,
-    });
-
-    try {
-      await sendExpoPushNotification({
-        userIds: [String(booking.customerId)],
-        title: 'OTP verified',
-        body: 'OTP verified successfully. Your trip will start now.',
-        data: { kind: 'booking_otp_verified', bookingId: String(params.bookingId) },
-      });
-    } catch {
-    }
-
-    return { bookingId: params.bookingId, verified: true, status: started.status };
+  static verifyBookingOtp = async (_params: { bookingId: string; driverId: string; otp: string }) => {
+    // OTP verification has been replaced with photo verification.
+    // This endpoint is kept for backward compatibility with old app versions.
+    throw new AppError(
+      'OTP verification has been removed. Please update your app to the latest version. The new flow requires photo verification before starting the trip.',
+      410  // HTTP 410 Gone
+    );
   };
 
   static rejectBooking = async (params: { bookingId: string; driverId: string }) => {
@@ -1276,8 +1208,13 @@ export class BookingService {
         throw new AppError('Trip can be started only after arriving at pickup', 409);
       }
 
-      if (typeof booking.otp === 'string' && booking.otp.trim().length > 0) {
-        throw new AppError('OTP verification required before starting the trip', 409);
+      // Photo verification required: 4 car photos + 1 selfie
+      const photoStatus = await TripPhotoService.isPickupVerificationComplete(params.bookingId);
+      if (!photoStatus.complete) {
+        throw new AppError(
+          `Photo verification incomplete. Missing: ${photoStatus.remaining.join(', ')}. Upload all 5 photos before starting the trip.`,
+          409
+        );
       }
     }
 
@@ -1333,17 +1270,14 @@ export class BookingService {
       }
 
       if (next === BookingStatus.ARRIVED) {
-        const otpCode = typeof booking.otp === 'string' && booking.otp.trim() ? booking.otp.trim() : '';
-        const otpLine = otpCode ? `\n🔒 Your trip OTP: ${otpCode}` : '';
         await sendPushWithRetry({
           userIds: [String(booking.customerId)],
           title: '📍 Driver has arrived!',
-          body: `Your driver is at the pickup point.${otpLine}\nShare the OTP with your driver to start the trip.`,
+          body: 'Your driver is at the pickup point and verifying the vehicle. Trip will start shortly!',
           data: {
             kind: 'booking_status',
             bookingId: String(params.bookingId),
             status: 'ARRIVED',
-            otp: otpCode,
           },
         });
       }
@@ -1691,14 +1625,11 @@ export class BookingService {
     // ── Socket events ──
     const io = getSocketServer();
 
-    // Build status payload — include OTP for ARRIVED so customer gets it via socket too
+    // Build status payload
     const statusPayload: any = {
       bookingId: params.bookingId,
       status: params.status,
     };
-    if (params.status === BookingStatus.ARRIVED && typeof booking.otp === 'string' && booking.otp.trim()) {
-      statusPayload.otp = booking.otp.trim();
-    }
 
     io.to(`booking:${params.bookingId}`).emit('booking:status', statusPayload);
 

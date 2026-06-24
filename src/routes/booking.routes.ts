@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticate, requireCustomerOrOfflineDriver, requireDriver } from '../middleware/auth';
 import BookingController from '../controllers/booking.controller';
+import TripPhotoController from '../controllers/tripPhoto.controller';
 import { TripShareService } from '../services/tripShare.service';
 import { AuthRequest } from '../middleware/auth';
 import { asyncHandler } from '../middleware/errorHandler';
@@ -25,6 +26,11 @@ router.post('/:bookingId/accept', requireDriver, BookingController.acceptBooking
 router.post('/:bookingId/reject', requireDriver, BookingController.rejectBooking);
 
 router.post('/:bookingId/verify-otp', requireDriver, BookingController.verifyBookingOtp);
+
+// Trip photo verification routes
+router.post('/:bookingId/trip-photos', requireDriver, TripPhotoController.uploadPhoto);
+router.get('/:bookingId/trip-photos', TripPhotoController.getPhotos);
+router.get('/:bookingId/trip-photos/status', TripPhotoController.getPhotoStatus);
 
 router.post('/:bookingId/rate', requireCustomerOrOfflineDriver, BookingController.rateBooking);
 

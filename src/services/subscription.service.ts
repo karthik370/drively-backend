@@ -14,7 +14,7 @@ export class SubscriptionService {
             return {
                 hasSubscription: false,
                 status: SubscriptionStatus.INACTIVE,
-                planPrice: 500,
+                planPrice: 50,
                 validUntil: null,
                 isExpired: true,
             };
@@ -55,7 +55,7 @@ export class SubscriptionService {
             select: { phoneNumber: true, email: true, firstName: true, lastName: true },
         });
 
-        const planPrice = 500;
+        const planPrice = 50;
         const cfOrderId = generateOrderId('dsub', params.driverId);
 
         let cfOrder;

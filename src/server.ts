@@ -121,10 +121,9 @@ app.use(cors({
   credentials: true,
 }));
 app.use(compression());
-// Large body limit ONLY for KYC selfie route (base64 images ~2-4MB)
-// All other routes get 5mb max to prevent memory spikes from malicious payloads
+// Large body limit for KYC selfie and trip photo routes (base64 images ~2-4MB each)
 app.post(
-  /\/kyc\/selfie/,
+  /\/(kyc\/selfie|bookings\/.*\/trip-photos)/,
   express.json({
     limit: '50mb',
     verify: (req: any, _res, buf) => { req.rawBody = buf; },
@@ -411,6 +410,21 @@ const startServer = async () => {
         logger.error('Failed to seed default badges:', error);
       }
     })();
+
+    // ── Hourly cleanup: delete expired Cloudinary trip photos (24hrs after trip ends) ──
+    const PHOTO_CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
+    setInterval(async () => {
+      try {
+        const { TripPhotoService } = await import('./services/tripPhoto.service');
+        const result = await TripPhotoService.cleanupExpiredPhotos();
+        if (result.deleted > 0 || result.errors > 0) {
+          logger.info('Trip photo cleanup completed', result);
+        }
+      } catch (error) {
+        logger.error('Trip photo cleanup failed:', error);
+      }
+    }, PHOTO_CLEANUP_INTERVAL);
+    logger.info('📸 Trip photo cleanup scheduled (every 1 hour)');
   } catch (error) {
     logger.error('Failed to start server:', error);
     process.exit(1);

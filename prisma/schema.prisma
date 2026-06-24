@@ -1154,17 +1154,18 @@ model RewardsCoin {
 
 // ─── Trip Photo Capture ──────────────────────────────────────────────────────
 model TripPhoto {
-  id          String   @id @default(uuid())
-  bookingId   String
-  booking     Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  uploadedBy  String
-  phase       String   @db.VarChar(10) // BEFORE | AFTER
-  imageUrl    String   @db.Text
-  label       String?  @db.VarChar(50) // front, back, left, right
-  latitude    Decimal? @db.Decimal(10, 8)
-  longitude   Decimal? @db.Decimal(11, 8)
-  capturedAt  DateTime @default(now())
-  createdAt   DateTime @default(now())
+  id                 String   @id @default(uuid())
+  bookingId          String
+  booking            Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  uploadedBy         String
+  phase              String   @db.VarChar(20) // PICKUP_VERIFICATION | BEFORE | AFTER
+  imageUrl           String   @db.Text
+  cloudinaryPublicId String?  @db.Text
+  label              String?  @db.VarChar(50) // front, back, left, right, selfie
+  latitude           Decimal? @db.Decimal(10, 8)
+  longitude          Decimal? @db.Decimal(11, 8)
+  capturedAt         DateTime @default(now())
+  createdAt          DateTime @default(now())
 
   @@index([bookingId])
   @@index([bookingId, phase])

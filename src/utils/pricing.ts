@@ -48,15 +48,16 @@ const getOneWayCharge = (distanceKm: number): number => {
 const getLocalPackage = (hours: number) => {
   const h = clamp(Math.round(hours), 1, 8);
   const priceByHour: Record<number, number> = {
-    1: 319,
-    2: 384,
-    3: 512,
-    4: 641,
-    5: 769,
-    6: 909,
-    7: 1029,
-    8: 1159,
+    1: 279,
+    2: 344,
+    3: 472,
+    4: 601,
+    5: 729,
+    6: 869,
+    7: 989,
+    8: 1119,
   };
+  
 
   return { hours: h, price: priceByHour[h] ?? 300 };
 };
@@ -173,14 +174,14 @@ export const computeFare = (params: {
 
     const selectedHours = clamp(Math.round(selectedHoursRaw ?? actualHours), 4, 18);
     const priceByHour: Record<number, number> = {
-      4: 1800,
-      6: 1800,
-      8: 1800,
-      10: 1800,
-      12: 1800,
-      14: 1999,
-      16: 2199,
-      18: 2399,
+      4: 1750,
+      6: 1750,
+      8: 1750,
+      10: 1750,
+      12: 1750,
+      14: 1959,
+      16: 2159,
+      18: 2359,
     };
 
     const allowed = Object.keys(priceByHour)
@@ -259,12 +260,12 @@ export const computeFare = (params: {
       const h = Math.max(1, Math.round(hours));
 
       const points: Array<{ h: number; p: number }> = [
-        { h: 1, p: 279 },
-        { h: 2, p: 299 },
-        { h: 4, p: 489 },
-        { h: 6, p: 699 },
-        { h: 8, p: 889 },
-        { h: 12, p: 1239 },
+        { h: 1, p: 259 },
+        { h: 2, p: 289 },
+        { h: 4, p: 469 },
+        { h: 6, p: 679 },
+        { h: 8, p: 869 },
+        { h: 12, p: 1219 },
       ];
 
       const exact = points.find((pt) => pt.h === h);
