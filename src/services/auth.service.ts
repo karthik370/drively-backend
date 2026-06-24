@@ -2,6 +2,7 @@ import prisma from '../config/database';
 import { hashPassword, comparePassword } from '../utils/encryption';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt';
 import { AppError } from '../middleware/errorHandler';
+import { logger } from '../utils/logger';
 import { User, UserType } from '@prisma/client';
 // Unused imports commented out
 // import { OtpService } from './otp.service';
@@ -226,21 +227,36 @@ export class AuthService {
       isVerified: user.isVerified,
     });
 
-    // Use upsert to handle concurrent login calls (same JWT iat = same refreshToken)
-    await prisma.session.upsert({
-      where: { refreshToken },
-      create: {
-        userId: user.id,
-        refreshToken,
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      },
-      update: {
-        userId: user.id,
-        isValid: true,
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        lastUsedAt: new Date(),
-      },
-    });
+    // Use upsert to handle concurrent login calls (same JWT iat = same refreshToken).
+    // Wrapped in try-catch: if two requests race and both INSERT the same token,
+    // catch P2002 and fall back to updateMany on the existing row.
+    try {
+      await prisma.session.upsert({
+        where: { refreshToken },
+        create: {
+          userId: user.id,
+          refreshToken,
+          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        },
+        update: {
+          userId: user.id,
+          isValid: true,
+          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+          lastUsedAt: new Date(),
+        },
+      });
+    } catch (sessionErr: any) {
+      // P2002 = unique constraint — a concurrent request already created this session
+      if (sessionErr?.code === 'P2002') {
+        logger.info('Concurrent login: session already exists, updating', { userId: user.id });
+        await prisma.session.updateMany({
+          where: { refreshToken },
+          data: { isValid: true, lastUsedAt: new Date() },
+        });
+      } else {
+        throw sessionErr;
+      }
+    }
 
     const { password: _, ...userWithoutPassword } = user;
 
