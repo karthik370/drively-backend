@@ -78,4 +78,34 @@ router.patch('/upi', asyncHandler(async (req: AuthRequest, res: Response) => {
     res.json({ success: true, data });
 }));
 
+// Driver wallet top-up — create Cashfree order
+router.post('/topup/orders', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    const { amount, paymentMethod } = req.body;
+    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+        res.status(400).json({ success: false, message: 'Valid amount required' });
+        return;
+    }
+    const data = await DriverWalletService.createTopupOrder({
+        userId,
+        amount: Number(amount),
+        paymentMethod: paymentMethod || 'UPI',
+    });
+    res.json({ success: true, data });
+}));
+
+// Driver wallet top-up — verify after Cashfree payment
+router.post('/topup/verify', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    const { cf_order_id } = req.body;
+    if (!cf_order_id) {
+        res.status(400).json({ success: false, message: 'cf_order_id required' });
+        return;
+    }
+    const data = await DriverWalletService.verifyTopup({ userId, cfOrderId: cf_order_id });
+    res.json({ success: true, data });
+}));
+
 export default router;

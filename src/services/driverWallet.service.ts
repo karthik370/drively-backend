@@ -1,8 +1,19 @@
 import prisma from '../config/database';
 import crypto from 'crypto';
+import { Prisma, PaymentMethod, PaymentStatus } from '@prisma/client';
 import { AppError } from '../middleware/errorHandler';
 import { initiatePayoutTransfer } from './cashfreePayout';
+import { createCashfreeOrder, verifyCashfreePayment, generateOrderId } from './cashfree';
 import { logger } from '../utils/logger';
+
+/** Trip-type platform fee constants */
+const PLATFORM_FEES: Record<string, number> = {
+    ONE_WAY: 10,
+    ROUND_TRIP: 20,
+    OUTSTATION: 30,
+    AIRPORT: 10,
+    SCHEDULE: 10,
+};
 
 export class DriverWalletService {
     /**
@@ -14,6 +25,8 @@ export class DriverWalletService {
             select: {
                 totalEarnings: true,
                 pendingEarnings: true,
+                walletTopupTotal: true,
+                platformFeesTotal: true,
                 bankAccountNumber: true,
                 bankIfscCode: true,
                 bankAccountHolderName: true,
@@ -24,7 +37,8 @@ export class DriverWalletService {
         if (!profile) throw new AppError('Driver profile not found', 404);
 
         const totalEarnings = Number(profile.totalEarnings || 0);
-        const pendingEarnings = Number(profile.pendingEarnings || 0);
+        const walletTopupTotal = Number((profile as any).walletTopupTotal || 0);
+        const platformFeesTotal = Number((profile as any).platformFeesTotal || 0);
 
         // Calculate total paid out (COMPLETED payouts)
         const paidOut = await prisma.driverPayout.aggregate({
@@ -40,19 +54,30 @@ export class DriverWalletService {
         });
         const pendingPayoutsAmount = Number(pendingPayouts._sum.amount ?? 0);
 
-        // Available balance is the total money that hasn't successfully reached the driver's bank yet
-        const availableBalance = Math.max(0, totalEarnings - totalPaidOut);
-        
-        // Withdrawable balance locks funds that are currently pending/processing to prevent double-withdrawal
-        const withdrawableBalance = Math.max(0, availableBalance - pendingPayoutsAmount);
+        // Net balance = all credits (earnings + topups) minus all debits (payouts + platform fees)
+        // This can go NEGATIVE (platform fees charged even before earnings)
+        const netBalance = totalEarnings + walletTopupTotal - totalPaidOut - platformFeesTotal;
+        const availableBalance = netBalance; // can be negative
+
+        // Withdrawable: only positive balance minus locked-in-flight payouts
+        const withdrawableBalance = Math.max(0, netBalance - pendingPayoutsAmount);
+
+        // Gate: driver is blocked from accepting bookings if balance <= -50
+        const BLOCK_THRESHOLD = -50;
+        const isBlocked = netBalance <= BLOCK_THRESHOLD;
+        const amountToSettle = isBlocked ? Math.abs(netBalance - BLOCK_THRESHOLD) : 0;
 
         return {
             totalEarnings,
-            pendingEarnings,
+            walletTopupTotal,
+            platformFeesTotal,
             availableBalance,
             withdrawableBalance,
             totalPaidOut,
             pendingPayoutsAmount,
+            isBlocked,
+            amountToSettle: Math.ceil(amountToSettle),
+            netBalance,
             payoutMethods: {
                 bank: (profile.bankAccountNumber && !profile.bankAccountNumber.startsWith('PEND'))
                     ? {
@@ -66,6 +91,188 @@ export class DriverWalletService {
                     : null,
             },
         };
+    }
+
+    /**
+     * Deduct platform fee from driver wallet when trip completes.
+     * Increments platformFeesTotal — reduces net balance (can go negative).
+     * Idempotent: checked by bookingId in payment metadata.
+     */
+    static async deductPlatformFee(driverId: string, bookingId: string, tripType: string): Promise<void> {
+        const feeAmount = PLATFORM_FEES[tripType?.toUpperCase()] ?? PLATFORM_FEES['ONE_WAY'];
+        if (feeAmount <= 0) return;
+
+        try {
+            // Idempotency: check if fee already deducted for this booking
+            const existing = await prisma.payment.findFirst({
+                where: {
+                    bookingId,
+                    gatewayResponse: { path: ['purpose'], equals: 'DRIVER_PLATFORM_FEE' },
+                },
+            });
+            if (existing) {
+                logger.info('[DriverWallet] Platform fee already deducted', { bookingId, driverId });
+                return;
+            }
+
+            await prisma.$transaction(async (tx) => {
+                await (tx.driverProfile as any).update({
+                    where: { userId: driverId },
+                    data: {
+                        platformFeesTotal: { increment: feeAmount },
+                    },
+                });
+
+                // Record the deduction as a Payment record for audit trail
+                await tx.payment.create({
+                    data: {
+                        bookingId,
+                        userId: driverId,
+                        amount: new Prisma.Decimal(feeAmount),
+                        paymentMethod: PaymentMethod.WALLET,
+                        status: PaymentStatus.PAID,
+                        processedAt: new Date(),
+                        gatewayResponse: {
+                            purpose: 'DRIVER_PLATFORM_FEE',
+                            tripType,
+                            feeAmount,
+                            driverId,
+                        } as any,
+                    },
+                });
+            });
+
+            logger.info('[DriverWallet] Platform fee deducted', { driverId, bookingId, tripType, feeAmount });
+        } catch (err: any) {
+            logger.error('[DriverWallet] Failed to deduct platform fee', { driverId, bookingId, feeAmount, error: err?.message });
+            // Non-critical — don't fail the trip completion
+        }
+    }
+
+    /**
+     * Create a Cashfree top-up order for driver wallet (identical pattern to customer wallet top-up).
+     */
+    static async createTopupOrder(params: { userId: string; amount: number; paymentMethod: PaymentMethod }) {
+        const amount = Math.round(params.amount * 100) / 100;
+        if (!Number.isFinite(amount) || amount <= 0) throw new AppError('Invalid amount', 400);
+
+        const profile = await prisma.driverProfile.findUnique({
+            where: { userId: params.userId },
+            select: { userId: true },
+        });
+        if (!profile) throw new AppError('Driver profile not found', 404);
+
+        const user = await prisma.user.findUnique({
+            where: { id: params.userId },
+            select: { phoneNumber: true, email: true, firstName: true, lastName: true },
+        });
+
+        const cfOrderId = generateOrderId('dwtop', params.userId);
+
+        const cfOrder = await createCashfreeOrder({
+            orderId: cfOrderId,
+            amount,
+            customerId: params.userId,
+            customerPhone: user?.phoneNumber || '9999999999',
+            customerEmail: user?.email || undefined,
+            customerName: [user?.firstName, user?.lastName].filter(Boolean).join(' ') || undefined,
+            orderNote: 'Driver Wallet Topup',
+            orderTags: {
+                purpose: 'DRIVER_WALLET_TOPUP',
+                userId: params.userId,
+            },
+        });
+
+        const payment = await prisma.payment.create({
+            data: {
+                bookingId: null,
+                userId: params.userId,
+                amount: new Prisma.Decimal(amount),
+                paymentMethod: params.paymentMethod,
+                status: PaymentStatus.PENDING,
+                gatewayTransactionId: cfOrder.orderId,
+                gatewayResponse: {
+                    cfOrderId: cfOrder.cfOrderId,
+                    orderId: cfOrder.orderId,
+                    paymentSessionId: cfOrder.paymentSessionId,
+                    purpose: 'DRIVER_WALLET_TOPUP',
+                } as any,
+            },
+        });
+
+        return {
+            paymentId: payment.id,
+            orderId: cfOrder.orderId,
+            paymentSessionId: cfOrder.paymentSessionId,
+            amount: cfOrder.orderAmount,
+            currency: cfOrder.orderCurrency,
+        };
+    }
+
+    /**
+     * Verify driver wallet top-up after Cashfree payment completes.
+     * Credits walletTopupTotal — increases net balance.
+     */
+    static async verifyTopup(params: { userId: string; cfOrderId: string }) {
+        const cfStatus = await verifyCashfreePayment(params.cfOrderId);
+        if (!cfStatus.isPaid) {
+            throw new AppError(`Payment not completed. Status: ${cfStatus.orderStatus}`, 400);
+        }
+
+        return await prisma.$transaction(async (tx) => {
+            const payment = await tx.payment.findFirst({
+                where: {
+                    userId: params.userId,
+                    gatewayTransactionId: params.cfOrderId,
+                },
+                orderBy: { createdAt: 'desc' },
+            });
+
+            if (!payment) throw new AppError('Payment record not found', 404);
+
+            // Idempotent: already processed
+            if (payment.status === PaymentStatus.PAID) {
+                const prof = await tx.driverProfile.findUnique({ where: { userId: params.userId }, select: { walletTopupTotal: true, totalEarnings: true, platformFeesTotal: true } });
+                const wt = Number((prof as any)?.walletTopupTotal || 0);
+                const te = Number(prof?.totalEarnings || 0);
+                const pf = Number((prof as any)?.platformFeesTotal || 0);
+                return { alreadyPaid: true, balance: te + wt - pf };
+            }
+
+            const amount = Number(payment.amount);
+
+            await tx.payment.update({
+                where: { id: payment.id },
+                data: {
+                    status: PaymentStatus.PAID,
+                    processedAt: new Date(),
+                    gatewayResponse: {
+                        ...(typeof payment.gatewayResponse === 'object' && payment.gatewayResponse ? (payment.gatewayResponse as any) : {}),
+                        cfPaymentId: cfStatus.cfPaymentId,
+                        orderStatus: cfStatus.orderStatus,
+                        verifiedAt: new Date().toISOString(),
+                    } as any,
+                },
+            });
+
+            await (tx.driverProfile as any).update({
+                where: { userId: params.userId },
+                data: {
+                    walletTopupTotal: { increment: amount },
+                },
+            });
+
+            const updatedProf = await tx.driverProfile.findUnique({
+                where: { userId: params.userId },
+                select: { totalEarnings: true, walletTopupTotal: true, platformFeesTotal: true } as any,
+            });
+            const newBalance = Number((updatedProf as any)?.totalEarnings || 0)
+                + Number((updatedProf as any)?.walletTopupTotal || 0)
+                - Number((updatedProf as any)?.platformFeesTotal || 0);
+
+            logger.info('[DriverWallet] Topup credited', { userId: params.userId, amount, newBalance });
+            return { alreadyPaid: false, credited: amount, balance: newBalance };
+        });
     }
 
     /**
@@ -87,6 +294,7 @@ export class DriverWalletService {
                 completedAt: true,
                 pickupAddress: true,
                 dropAddress: true,
+                tripType: true,
             },
             orderBy: { completedAt: 'desc' },
             take: limit,
@@ -114,10 +322,40 @@ export class DriverWalletService {
             },
         });
 
+        // Get platform fee deductions (from Payment records)
+        const feePayments = await prisma.payment.findMany({
+            where: {
+                userId,
+                gatewayResponse: { path: ['purpose'], equals: 'DRIVER_PLATFORM_FEE' },
+            },
+            orderBy: { processedAt: 'desc' },
+            take: 30,
+            select: { id: true, amount: true, bookingId: true, processedAt: true, gatewayResponse: true },
+        });
+
+        // Get wallet topup payments
+        const topupPayments = await prisma.payment.findMany({
+            where: {
+                userId,
+                status: 'PAID',
+                gatewayResponse: { path: ['purpose'], equals: 'DRIVER_WALLET_TOPUP' },
+            },
+            orderBy: { processedAt: 'desc' },
+            take: 20,
+            select: { id: true, amount: true, processedAt: true },
+        });
+
         // Merge into a unified timeline
         const transactions: any[] = [];
 
+        // Map bookingId → platform fee for display
+        const feeByBookingId: Record<string, number> = {};
+        for (const f of feePayments) {
+            if (f.bookingId) feeByBookingId[f.bookingId] = Number(f.amount);
+        }
+
         for (const b of bookings) {
+            const tripFee = feeByBookingId[b.id] ?? (PLATFORM_FEES[(b as any).tripType?.toUpperCase()] ?? 0);
             transactions.push({
                 id: b.id,
                 type: 'RIDE_EARNING',
@@ -127,8 +365,31 @@ export class DriverWalletService {
                     ? `${(b.pickupAddress as string).substring(0, 40)}...`
                     : undefined,
                 commission: Number(b.platformCommission),
+                platformFee: tripFee,
                 totalFare: Number(b.totalAmount),
                 date: b.completedAt || new Date(),
+            });
+            // Add fee deduction as separate line if deducted
+            if (tripFee > 0) {
+                transactions.push({
+                    id: `fee_${b.id}`,
+                    type: 'PLATFORM_FEE',
+                    amount: -tripFee,
+                    description: `Platform fee — Ride #${b.bookingNumber?.slice(0, 8) ?? b.id.slice(0, 8)}`,
+                    subtext: `${(b as any).tripType ?? ''} trip charge`,
+                    date: b.completedAt || new Date(),
+                });
+            }
+        }
+
+        for (const top of topupPayments) {
+            transactions.push({
+                id: `topup_${top.id}`,
+                type: 'WALLET_TOPUP',
+                amount: Number(top.amount),
+                description: 'Wallet top-up',
+                subtext: 'Added via Cashfree',
+                date: top.processedAt || new Date(),
             });
         }
 

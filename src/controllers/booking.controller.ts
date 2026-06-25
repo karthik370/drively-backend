@@ -4,6 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import { AppError, asyncHandler } from '../middleware/errorHandler';
 import { BookingStatus, CancelledBy, PaymentMethod, TransmissionType, UserType, VehicleType } from '@prisma/client';
 import BookingService from '../services/booking.service';
+import { DriverWalletService } from '../services/driverWallet.service';
 import prisma from '../config/database';
 
 const createBookingSchema = Joi.object({
@@ -281,6 +282,21 @@ export class BookingController {
     if (!bookingId) {
       throw new AppError('bookingId is required', 400);
     }
+
+    // ── Wallet gate: block if driver balance ≤ -₹50 ─────────────────────────
+    try {
+      const walletSummary = await DriverWalletService.getWalletSummary(req.user.id);
+      if (walletSummary.isBlocked) {
+        throw new AppError(
+          `Your wallet balance is ₹${walletSummary.availableBalance.toFixed(0)}. Please top up at least ₹${walletSummary.amountToSettle} to accept bookings.`,
+          403,
+        );
+      }
+    } catch (err: any) {
+      // Re-throw AppErrors (wallet gate), swallow profile-not-found errors
+      if (err?.statusCode === 403) throw err;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     const result = await BookingService.acceptBooking({
       bookingId,

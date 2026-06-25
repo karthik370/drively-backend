@@ -382,6 +382,8 @@ model DriverProfile {
   totalTrips                Int                   @default(0)
   totalEarnings             Decimal               @default(0) @db.Decimal(10, 2)
   pendingEarnings           Decimal               @default(0) @db.Decimal(10, 2)
+  walletTopupTotal          Decimal               @default(0) @db.Decimal(10, 2)
+  platformFeesTotal         Decimal               @default(0) @db.Decimal(10, 2)
   acceptanceRate            Decimal               @default(0) @db.Decimal(5, 2)
   cancellationRate          Decimal               @default(0) @db.Decimal(5, 2)
   averageResponseTime       Int                   @default(0)

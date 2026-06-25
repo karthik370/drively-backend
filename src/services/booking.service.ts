@@ -15,6 +15,8 @@ import { RewardsService } from './rewards.service';
 import { ReferralService } from './referral.service';
 import { DiscountService } from './discount.service';
 import { TripPhotoService } from './tripPhoto.service';
+import { DriverWalletService } from './driverWallet.service';
+import { WalletService } from './wallet.service';
 
 // ── Cache Invalidation Helper ───────────────────────────────────────────────
 // Call this whenever booking status changes so Redis never serves stale data.
@@ -1557,6 +1559,17 @@ export class BookingService {
             totalTrips: { increment: 1 },
           } as any,
         });
+
+        // Deduct platform fee from driver wallet at trip completion
+        // ONE_WAY=₹10, ROUND_TRIP=₹20, OUTSTATION=₹30 (regardless of sub-type)
+        const tripTypeForFee = String((finalBooking as any).tripType || 'ONE_WAY').toUpperCase();
+        DriverWalletService.deductPlatformFee(
+          String(finalBooking.driverId),
+          params.bookingId,
+          tripTypeForFee,
+        ).catch((err: any) => {
+          logger.warn('[Booking] Platform fee deduction failed (non-critical)', { bookingId: params.bookingId, error: err?.message });
+        });
       }
 
       try {
@@ -1919,6 +1932,11 @@ export class BookingService {
         data: { isAvailable: true } as any,
       });
     }
+
+    // Refund customer wallet if booking was paid via wallet
+    WalletService.refundBookingWallet({ bookingId: params.bookingId }).catch((err: any) => {
+      logger.warn('[Booking] Wallet refund failed on cancellation', { bookingId: params.bookingId, error: err?.message });
+    });
 
     const io = getSocketServer();
     io.to(`booking:${params.bookingId}`).emit('booking:cancelled', {

@@ -293,4 +293,81 @@ export class WalletService {
       return { alreadyPaid: false, balance: Number(nextBalance) };
     });
   }
+
+  /**
+   * Refund a wallet-paid booking back to the customer's wallet.
+   * Called when a booking is cancelled after wallet payment was confirmed.
+   * Idempotent: checks for existing REFUND transaction for this booking.
+   */
+  static async refundBookingWallet(params: { bookingId: string }): Promise<void> {
+    const booking = await prisma.booking.findUnique({
+      where: { id: params.bookingId },
+      select: {
+        id: true,
+        customerId: true,
+        totalAmount: true,
+      },
+    }) as any;
+
+    if (!booking) return; // Booking not found — no-op
+
+    // Check if this booking was paid via wallet (check the booking's paymentMethod field directly)
+    const bookingFull = await prisma.booking.findUnique({
+      where: { id: params.bookingId },
+      select: { paymentMethod: true, paymentStatus: true, totalAmount: true, customerId: true },
+    }) as any;
+
+    if (!bookingFull) return;
+    if (bookingFull.paymentMethod !== 'WALLET') return; // Not a wallet booking
+    if (bookingFull.paymentStatus !== 'PAID') return; // Not yet paid — nothing to refund
+
+    const walletPayment = true; // already confirmed above
+
+    if (!walletPayment) return; // Not a wallet payment — nothing to refund
+
+    const refundAmount = Number(bookingFull.totalAmount || booking?.totalAmount || 0);
+    if (refundAmount <= 0) return;
+
+    const customerId = bookingFull.customerId || booking?.customerId;
+    if (!customerId) return;
+
+    await prisma.$transaction(async (tx) => {
+      // Idempotency check: already refunded?
+      const existing = await tx.walletTransaction.findFirst({
+        where: {
+          userId: customerId,
+          bookingId: params.bookingId,
+          reason: WalletTransactionReason.REFUND,
+        },
+      });
+      if (existing) return; // Already refunded
+
+      const profile = await tx.customerProfile.findUnique({
+        where: { userId: customerId },
+        select: { walletBalance: true },
+      });
+      if (!profile) return;
+
+      const newBalance = profile.walletBalance.plus(new Prisma.Decimal(refundAmount));
+
+      await tx.customerProfile.update({
+        where: { userId: customerId },
+        data: { walletBalance: newBalance },
+      });
+
+      await tx.walletTransaction.create({
+        data: {
+          userId: customerId,
+          type: WalletTransactionType.CREDIT,
+          reason: WalletTransactionReason.REFUND,
+          status: WalletTransactionStatus.COMPLETED,
+          amount: toDecimal(refundAmount),
+          balanceAfter: newBalance,
+          bookingId: params.bookingId,
+          meta: { source: 'booking_cancellation_refund' } as any,
+        },
+      });
+    });
+  }
 }
+
