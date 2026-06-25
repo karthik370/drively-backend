@@ -340,8 +340,6 @@ export class BookingController {
         driverEarnings: result.booking.driverEarnings,
         commissionPercentage: result.booking.commissionPercentage,
         otp: result.booking.otp,
-        customer: (result.booking as any).customer ?? null,
-        driver: result.driver ?? null,
       },
     });
   });
