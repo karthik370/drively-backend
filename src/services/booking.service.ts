@@ -904,7 +904,7 @@ export class BookingService {
     } catch { }
 
     invalidateBookingCaches([booking.customerId, params.driverId]);
-    return { booking: acceptedBooking };
+    return { booking: acceptedBooking, driver: driverUser };
   };
 
   static getActiveBookingForUser = async (userId: string) => {
