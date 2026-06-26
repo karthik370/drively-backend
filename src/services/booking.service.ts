@@ -1522,6 +1522,7 @@ export class BookingService {
             driverId: true,
             paymentMethod: true,
             paymentStatus: true,
+            tripType: true,       // ←← CRITICAL: needed for correct platform fee (ONE_WAY=₹10, ROUND_TRIP=₹20, OUTSTATION=₹30)
             totalAmount: true,
             discountAmount: true,
             platformCommission: true,
