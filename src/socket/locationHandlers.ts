@@ -5,16 +5,19 @@ import { logger } from '../utils/logger';
 import { calculateDistance, calculateETA } from '../utils/mapUtils';
 import { BookingStatus } from '@prisma/client';
 import { MatchingService } from '../services/matching.service';
+import { computeFare, normalizeTripType } from '../utils/pricing';
 
 const BOOKING_CACHE_MS = 5000;
 const ETA_THROTTLE_MS = 8000;
 const LIVE_DISTANCE_THROTTLE_MS = 4000;
 const USER_LAST_LOCATION_THROTTLE_MS = 15000;
+const LIVE_FARE_THROTTLE_MS = 30000;
 
 const bookingCache = new Map<string, { ts: number; value: any }>();
 const lastEtaTsByBooking = new Map<string, number>();
 const lastDistanceTsByBooking = new Map<string, number>();
 const lastUserLocationTsByDriver = new Map<string, number>();
+const lastFareTsByBooking = new Map<string, number>();
 
 const getCachedBooking = async (bookingId: string) => {
   const now = Date.now();
@@ -34,6 +37,12 @@ const getCachedBooking = async (bookingId: string) => {
       actualDistance: true,
       driverTravelDistanceKm: true,
       pricingBreakdown: true,
+      startedAt: true,
+      totalAmount: true,
+      driverEarnings: true,
+      discountAmount: true,
+      experiencedDriverFee: true,
+      estimatedDistance: true,
     } as any,
   })) as any;
 
@@ -343,6 +352,64 @@ export const registerLocationHandlers = (io: Server, socket: AuthenticatedSocket
                       ...(shouldUpdateActualTripDistance ? { actualDistance: liveTripDistanceKm } : {}),
                     } as any,
                   });
+
+                  // ── Live fare emit (throttled every 30s) ───────────────────
+                  // Recompute fare from actual elapsed time + actual distance
+                  // and push to both driver and customer in real time.
+                  if (shouldUpdateActualTripDistance) {
+                    const nowFare = Date.now();
+                    const lastFareTs = lastFareTsByBooking.get(String(data.bookingId)) ?? 0;
+                    if (nowFare - lastFareTs >= LIVE_FARE_THROTTLE_MS) {
+                      lastFareTsByBooking.set(String(data.bookingId), nowFare);
+                      try {
+                        const startedAtRaw = (booking as any).startedAt;
+                        const startedMs = startedAtRaw ? new Date(startedAtRaw).getTime() : 0;
+                        const elapsedSeconds = startedMs > 0 ? Math.max(0, Math.round((nowFare - startedMs) / 1000)) : 0;
+                        const actualKm = Math.max(0, liveTripDistanceKm);
+                        const tripType = normalizeTripType((booking as any).tripType);
+                        const pb = typeof (booking as any).pricingBreakdown === 'object' && (booking as any).pricingBreakdown
+                          ? (booking as any).pricingBreakdown as any : {} as any;
+                        const requestedHours = Number(pb?.packageHours ?? pb?.durationHours ?? 0) || undefined;
+
+                        const liveFareResult = computeFare({
+                          tripType,
+                          distanceMeters: actualKm * 1000,
+                          durationSeconds: elapsedSeconds,
+                          requestedHours,
+                          startTime: startedMs > 0 ? new Date(startedMs) : undefined,
+                          isEstimate: false,
+                          outstationTripType: pb?.outstationTripType ?? undefined,
+                          outstationPlannedDistanceKm: Number(pb?.plannedDropDistanceKm ?? 0) || undefined,
+                        });
+
+                        // Apply discounts to get customer-facing total
+                        const discountAmount = Number((booking as any).discountAmount ?? 0);
+                        const experiencedDriverFee = Number((booking as any).experiencedDriverFee ?? 0);
+                        const customerLiveFare = Math.max(0, Math.round((liveFareResult.total - discountAmount + experiencedDriverFee) * 100) / 100);
+                        const driverLiveFare = Math.max(0, Math.round((liveFareResult.total + experiencedDriverFee) * 100) / 100);
+
+                        const farePayload = {
+                          bookingId: data.bookingId,
+                          liveFare: customerLiveFare,
+                          driverLiveFare,
+                          baseFare: liveFareResult.total,
+                          actualDistanceKm: Math.round(actualKm * 100) / 100,
+                          elapsedSeconds,
+                          breakdown: liveFareResult.breakdown,
+                        };
+
+                        io.to(`booking:${data.bookingId}`).emit('fare:live-update', farePayload);
+                        if (booking.customerId) {
+                          io.to(`user:${booking.customerId}`).emit('fare:live-update', farePayload);
+                        }
+                      } catch (fareErr) {
+                        logger.warn('Failed to compute live fare', {
+                          error: fareErr,
+                          bookingId: data.bookingId,
+                        });
+                      }
+                    }
+                  }
                 } catch (error) {
                   logger.warn('Failed to update live distance on socket location update', {
                     error,
