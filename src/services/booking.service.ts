@@ -582,10 +582,19 @@ export class BookingService {
 
     const promoDiscountAmount = promo ? promo.discountAmount : 0;
     const discountAmount = promoDiscountAmount + memberDiscounts.totalDiscount;
+
+    // customerPays = discounted amount
     const payableTotal = Math.max(0, Math.round((fare.total - discountAmount + experiencedDriverFee) * 100) / 100);
 
-    const platformCommission = Math.round((payableTotal * commissionPercentage) / 100);
-    const driverEarnings = Math.max(0, payableTotal - platformCommission);
+    // driverBase = full meter fare (platform absorbs ALL discounts — membership, streak, promo)
+    // Driver is never penalised for platform-created incentives.
+    const driverBase = Math.max(payableTotal, Math.max(0, Math.round((fare.total + experiencedDriverFee) * 100) / 100));
+    const platformCommission = Math.round((driverBase * commissionPercentage) / 100);
+    const driverEarnings = Math.max(0, driverBase - platformCommission);
+
+    // platformSubsidy = gap between what customer pays and what driver earns
+    // (= total discount absorbed by platform)
+    const platformSubsidy = Math.max(0, Math.round((driverEarnings - (payableTotal - platformCommission)) * 100) / 100);
 
     const discountBreakdown = {
       promoDiscount: promoDiscountAmount,
@@ -594,6 +603,7 @@ export class BookingService {
       membershipType: memberDiscounts.breakdown.membershipType,
       streakRides: memberDiscounts.breakdown.streakRides,
       streakPct: memberDiscounts.breakdown.streakPct,
+      platformSubsidy,
     };
 
     const booking = await prisma.$transaction(async (tx) => {
@@ -616,7 +626,7 @@ export class BookingService {
           estimatedDistance: distanceMeters ? distanceMeters / 1000 : null,
           estimatedDuration: durationSeconds ? Math.round(durationSeconds / 60) : null,
           routePolyline: polyline,
-          pricingBreakdown: { ...(fare.breakdown as any), discounts: discountBreakdown },
+          pricingBreakdown: { ...(fare.breakdown as any), discounts: discountBreakdown, platformSubsidy } as any,
           totalAmount: payableTotal,
           promoCodeId: promo ? promo.promotionId : null,
           discountAmount,
@@ -704,7 +714,10 @@ export class BookingService {
                 address: (booking as any).dropAddress,
               }
               : null,
-          fare: Number((booking as any).totalAmount),
+          // Driver sees their FULL earnings (platform absorbs discounts)
+          fare: Number((booking as any).driverEarnings),
+          customerFare: Number((booking as any).totalAmount), // what customer actually pays
+          platformSubsidy: Number(((booking as any).pricingBreakdown as any)?.platformSubsidy ?? 0),
           vehicleType: (booking as any).vehicleType ?? undefined,
           transmissionType: (booking as any).transmissionType ?? undefined,
           scheduledTime: scheduledAt ? scheduledAt.toISOString() : undefined,
@@ -1484,10 +1497,17 @@ export class BookingService {
         // Re-apply experienced driver fee from original booking
         const experiencedDriverFee = Math.max(0, Number((booking as any).experiencedDriverFee || 0));
 
+        // customerPays = discounted amount (unchanged)
         const payableTotal = Math.max(0, Math.round((fare.total - discountAmount + experiencedDriverFee) * 100) / 100);
         const commissionPct = clamp(Number(process.env.COMMISSION_PERCENTAGE || 0), 0, 100);
-        const platformCommission = Math.round((payableTotal * commissionPct) / 100);
-        const driverEarnings = Math.max(0, payableTotal - platformCommission);
+
+        // driverBase = full fare — platform absorbs ALL discounts
+        const driverBase = Math.max(payableTotal, Math.max(0, Math.round((fare.total + experiencedDriverFee) * 100) / 100));
+        const platformCommission = Math.round((driverBase * commissionPct) / 100);
+        const driverEarnings = Math.max(0, driverBase - platformCommission);
+
+        // platformSubsidy = gap absorbed by platform
+        const platformSubsidy = Math.max(0, Math.round((driverEarnings - (payableTotal - platformCommission)) * 100) / 100);
 
         // Build the full discount breakdown for receipt display
         const discountBreakdown = {
@@ -1497,6 +1517,7 @@ export class BookingService {
           membershipType: originalDiscounts?.membershipType || null,
           streakRides: originalDiscounts?.streakRides || 0,
           streakPct: originalDiscounts?.streakPct || 0,
+          platformSubsidy,
         };
 
         const updatedFare = await tx.booking.update({
@@ -1510,6 +1531,7 @@ export class BookingService {
               actualDistanceKm: Math.round(actualDistanceKm * 100) / 100,
               experiencedDriverFee,
               discounts: discountBreakdown,
+              platformSubsidy,
             } as any,
             totalAmount: payableTotal,
             discountAmount,
@@ -1831,7 +1853,10 @@ export class BookingService {
               address: (booking as any).dropAddress,
             }
             : null,
-        fare: Number((booking as any).totalAmount),
+        // Driver sees their FULL earnings (platform absorbs discounts)
+        fare: Number((booking as any).driverEarnings),
+        customerFare: Number((booking as any).totalAmount), // what customer pays
+        platformSubsidy: Number(((booking as any).pricingBreakdown as any)?.platformSubsidy ?? 0),
         vehicleType: (booking as any).vehicleType ?? undefined,
         transmissionType: (booking as any).transmissionType ?? undefined,
         distanceKm: typeof (booking as any).estimatedDistance === 'number' ? Number((booking as any).estimatedDistance) : undefined,

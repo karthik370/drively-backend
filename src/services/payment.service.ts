@@ -4,6 +4,7 @@ import { PaymentMethod, PaymentStatus } from '@prisma/client';
 import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId } from './cashfree';
 import { getSocketServer } from '../socket/io';
 import { logger } from '../utils/logger';
+import { DriverWalletService } from './driverWallet.service';
 
 /** Credit driver's wallet after an online payment is confirmed.
  *  Idempotent — uses a `driverCredited` flag to prevent double-crediting
@@ -431,9 +432,12 @@ export class PaymentService {
         customerId: true,
         driverId: true,
         totalAmount: true,
+        driverEarnings: true,
+        pricingBreakdown: true,
         paymentStatus: true,
         paymentMethod: true,
         status: true,
+        tripType: true,
       },
     });
 
@@ -485,8 +489,41 @@ export class PaymentService {
       });
     });
 
-    // NOTE: We do NOT call creditDriverForBooking here because the
-    // driver already has the physical cash — no wallet credit needed.
+    // NOTE: Driver physically collected customerFare (totalAmount) in cash.
+    // If there's a platform subsidy (discount was platform-funded), credit the
+    // difference to driver's wallet immediately so driver earns the full fare.
+    const subsidyAmount = (() => {
+      const pb = typeof (booking as any).pricingBreakdown === 'object' && (booking as any).pricingBreakdown
+        ? (booking as any).pricingBreakdown as any : {};
+      // Try platformSubsidy from top-level pricingBreakdown or from discounts sub-object
+      const sub = Number(pb?.platformSubsidy ?? pb?.discounts?.platformSubsidy ?? 0);
+      if (sub > 0) return sub;
+      // Fallback: driverEarnings - totalAmount
+      const earnings = Number((booking as any).driverEarnings || 0);
+      const paid = Number(booking.totalAmount || 0);
+      return Math.max(0, Math.round((earnings - paid) * 100) / 100);
+    })();
+
+    if (subsidyAmount > 0 && booking.driverId) {
+      const discountTypes: string[] = [];
+      const pb = typeof (booking as any).pricingBreakdown === 'object' && (booking as any).pricingBreakdown
+        ? (booking as any).pricingBreakdown as any : {};
+      const discounts = pb?.discounts || {};
+      if (Number(discounts.membershipDiscount || 0) > 0) discountTypes.push('membership');
+      if (Number(discounts.streakDiscount || 0) > 0) discountTypes.push('streak bonus');
+      if (Number(discounts.promoDiscount || 0) > 0) discountTypes.push('promo code');
+      const reason = discountTypes.length > 0
+        ? `Platform subsidy for ${discountTypes.join(' + ')} discount on this ride`
+        : 'Platform discount subsidy';
+
+      // Fire-and-forget (non-blocking, idempotent)
+      void DriverWalletService.creditSubsidy({
+        driverId: booking.driverId,
+        bookingId: booking.id,
+        amount: subsidyAmount,
+        reason,
+      });
+    }
 
     // Notify both parties via socket
     // NOTE: Users are in `user:${userId}` rooms — must use prefix (socketHandler.ts:47)

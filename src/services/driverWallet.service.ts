@@ -94,6 +94,83 @@ export class DriverWalletService {
     }
 
     /**
+     * Credit platform subsidy to driver for CASH trips.
+     * Called immediately after "Collect Cash" — bridges the gap between what
+     * customer paid physically (discounted fare) and what driver should earn (full fare).
+     *
+     * Idempotency: checks Payment table for existing DRIVER_SUBSIDY record for this bookingId.
+     * Safe to call multiple times — second call is a no-op.
+     */
+    static async creditSubsidy(params: {
+        driverId: string;
+        bookingId: string;
+        amount: number;
+        reason: string;
+    }): Promise<void> {
+        if (params.amount <= 0) return; // no subsidy needed
+
+        try {
+            // Idempotency guard — prevent double-crediting
+            const existing = await prisma.payment.findFirst({
+                where: {
+                    bookingId: params.bookingId,
+                    userId: params.driverId,
+                    gatewayResponse: { path: ['purpose'], equals: 'DRIVER_SUBSIDY' },
+                },
+            });
+            if (existing) {
+                logger.info('[DriverWallet] Subsidy already credited, skipping', { bookingId: params.bookingId, driverId: params.driverId });
+                return;
+            }
+
+            await prisma.$transaction(async (tx) => {
+                // Credit totalEarnings so it shows up in wallet balance
+                await tx.driverProfile.update({
+                    where: { userId: params.driverId },
+                    data: {
+                        totalEarnings: { increment: params.amount },
+                        pendingEarnings: { increment: params.amount },
+                    } as any,
+                });
+
+                // Audit trail — visible in wallet transaction history
+                await tx.payment.create({
+                    data: {
+                        bookingId: params.bookingId,
+                        userId: params.driverId,
+                        amount: new Prisma.Decimal(params.amount),
+                        paymentMethod: PaymentMethod.WALLET,
+                        status: PaymentStatus.PAID,
+                        processedAt: new Date(),
+                        gatewayResponse: {
+                            purpose: 'DRIVER_SUBSIDY',
+                            reason: params.reason,
+                            amount: params.amount,
+                            driverId: params.driverId,
+                            creditedAt: new Date().toISOString(),
+                        } as any,
+                    },
+                });
+            });
+
+            logger.info('[DriverWallet] Platform subsidy credited', {
+                driverId: params.driverId,
+                bookingId: params.bookingId,
+                amount: params.amount,
+                reason: params.reason,
+            });
+        } catch (err: any) {
+            logger.error('[DriverWallet] Failed to credit subsidy', {
+                driverId: params.driverId,
+                bookingId: params.bookingId,
+                amount: params.amount,
+                error: err?.message,
+            });
+            // Non-critical — don't fail the cash collection flow
+        }
+    }
+
+    /**
      * Deduct platform fee from driver wallet when trip completes.
      * Increments platformFeesTotal — reduces net balance (can go negative).
      * Idempotent: checked by bookingId in payment metadata.
@@ -333,6 +410,18 @@ export class DriverWalletService {
             select: { id: true, amount: true, bookingId: true, processedAt: true, gatewayResponse: true },
         });
 
+        // Get platform subsidy credits (cash trips — platform topped up driver wallet)
+        const subsidyPayments = await prisma.payment.findMany({
+            where: {
+                userId,
+                status: 'PAID',
+                gatewayResponse: { path: ['purpose'], equals: 'DRIVER_SUBSIDY' },
+            },
+            orderBy: { processedAt: 'desc' },
+            take: 30,
+            select: { id: true, amount: true, bookingId: true, processedAt: true, gatewayResponse: true },
+        });
+
         // Get wallet topup payments
         const topupPayments = await prisma.payment.findMany({
             where: {
@@ -356,6 +445,10 @@ export class DriverWalletService {
 
         for (const b of bookings) {
             const tripFee = feeByBookingId[b.id] ?? (PLATFORM_FEES[(b as any).tripType?.toUpperCase()] ?? 0);
+            const pb = typeof (b as any).pricingBreakdown === 'object' && (b as any).pricingBreakdown
+                ? (b as any).pricingBreakdown as any : {};
+            const subsidy = Number(pb?.platformSubsidy ?? pb?.discounts?.platformSubsidy ?? 0);
+
             transactions.push({
                 id: b.id,
                 type: 'RIDE_EARNING',
@@ -366,10 +459,11 @@ export class DriverWalletService {
                     : undefined,
                 commission: Number(b.platformCommission),
                 platformFee: tripFee,
-                totalFare: Number(b.totalAmount),
+                platformSubsidy: subsidy,
+                customerFare: Number(b.totalAmount), // what customer paid
                 date: b.completedAt || new Date(),
             });
-            // Add fee deduction as separate line if deducted
+            // Platform fee deduction as separate line
             if (tripFee > 0) {
                 transactions.push({
                     id: `fee_${b.id}`,
@@ -380,6 +474,20 @@ export class DriverWalletService {
                     date: b.completedAt || new Date(),
                 });
             }
+        }
+
+        // Subsidy credits from Payment records (CASH trips only)
+        for (const sub of subsidyPayments) {
+            const gr = typeof sub.gatewayResponse === 'object' && sub.gatewayResponse
+                ? (sub.gatewayResponse as any) : {};
+            transactions.push({
+                id: `subsidy_${sub.id}`,
+                type: 'PLATFORM_SUBSIDY',
+                amount: Number(sub.amount),
+                description: `Platform subsidy — Ride #${sub.bookingId?.slice(0, 8) ?? '?'}`,
+                subtext: gr.reason || 'Membership/streak discount absorbed by platform',
+                date: sub.processedAt || new Date(),
+            });
         }
 
         for (const top of topupPayments) {
