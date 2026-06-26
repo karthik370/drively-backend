@@ -15,6 +15,27 @@ let lastKickoffRecentBookingsTs = 0;
 const recentlyBroadcastBookings = new Set<string>();
 const BROADCAST_DEDUP_TTL_MS = 60_000; // 60 seconds
 
+// ── Per-driver push dedup ────────────────────────────────────────────────────
+// Tracks which (driver, booking) pairs have already received a push notification.
+// Without this, when a driver comes online, they receive push for EVERY pending
+// booking simultaneously (one per kickoffMatchingForRecentPendingBookings call).
+// TTL matches BROADCAST_DEDUP_TTL_MS so stale entries are cleaned up.
+const notifiedDriverByBooking = new Map<string, Set<string>>(); // bookingId -> Set<driverId>
+
+const hasDriverBeenNotified = (bookingId: string, driverId: string): boolean => {
+  return notifiedDriverByBooking.get(bookingId)?.has(driverId) ?? false;
+};
+
+const markDriverNotified = (bookingId: string, driverIds: string[]): void => {
+  if (!notifiedDriverByBooking.has(bookingId)) {
+    notifiedDriverByBooking.set(bookingId, new Set());
+    // Auto-cleanup after TTL
+    setTimeout(() => notifiedDriverByBooking.delete(bookingId), BROADCAST_DEDUP_TTL_MS);
+  }
+  const set = notifiedDriverByBooking.get(bookingId)!;
+  driverIds.forEach(id => set.add(id));
+};
+
 const markAsBroadcast = (bookingId: string) => {
   recentlyBroadcastBookings.add(bookingId);
   setTimeout(() => recentlyBroadcastBookings.delete(bookingId), BROADCAST_DEDUP_TTL_MS);
@@ -234,12 +255,16 @@ export class MatchingService {
         select: { userId: true },
         take: 500,
       });
-      // Exclude favourite drivers — they already received the priority notification above
+      // Exclude favourite drivers (already notified above) AND drivers already notified
+      // for this booking (prevents blast of N pushes when a driver comes online and
+      // kickoffMatchingForRecentPendingBookings fires for all N pending bookings at once).
       const driverIds = online
         .map((d: any) => String(d.userId))
         .filter(Boolean)
-        .filter((id: string) => !alreadyNotifiedIds.has(id));
+        .filter((id: string) => !alreadyNotifiedIds.has(id))
+        .filter((id: string) => !hasDriverBeenNotified(bookingId, id));
       if (driverIds.length) {
+        markDriverNotified(bookingId, driverIds);
         await sendExpoPushNotification({
           userIds: driverIds,
           title: 'New booking request',

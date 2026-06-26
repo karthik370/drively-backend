@@ -225,6 +225,21 @@ export const registerLocationHandlers = (io: Server, socket: AuthenticatedSocket
 
         await setDriverGeo(socket.userId, Number(data.latitude), Number(data.longitude));
 
+        // Ensure the socket is in online-drivers room.
+        // This is the safety net for background reconnects: if the driver's socket
+        // reconnected while the app was in background, the location update arrives
+        // before driver:online is re-emitted. Re-joining here keeps them in the pool.
+        if (isAvailable) {
+          socket.join('online-drivers');
+          const profileForRoom = await prisma.driverProfile.findUnique({
+            where: { userId: socket.userId },
+            select: { isExperienced: true } as any,
+          });
+          if ((profileForRoom as any)?.isExperienced) {
+            socket.join('experienced-drivers');
+          }
+        }
+
         if (data.bookingId) {
           await prisma.location.create({
             data: {

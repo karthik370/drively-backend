@@ -1,5 +1,6 @@
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import prisma from '../config/database';
 import { logger } from '../utils/logger';
 import { cacheGet } from '../config/redis';
 import { registerLocationHandlers } from './locationHandlers';
@@ -40,11 +41,35 @@ export const initializeSocket = (io: Server) => {
     }
   });
 
-  io.on('connection', (socket: AuthenticatedSocket) => {
+  io.on('connection', async (socket: AuthenticatedSocket) => {
     logger.info(`User connected: ${socket.userId}`);
 
     if (socket.userId) {
       socket.join(`user:${socket.userId}`);
+    }
+
+    // ── Auto-restore online-drivers room membership after reconnect ──────────
+    // When a driver's app goes to background, the socket may disconnect.
+    // The backend DB still has isOnline=true (we never wipe it on disconnect).
+    // On the next connection (reconnect by background task or app resume), we
+    // check the DB and immediately re-add the driver to online-drivers so they
+    // receive booking:offer socket events without needing to re-emit driver:online.
+    if (socket.userId && (socket.userType === 'DRIVER' || socket.userType === 'BOTH')) {
+      try {
+        const profile = await prisma.driverProfile.findUnique({
+          where: { userId: socket.userId },
+          select: { isOnline: true, isExperienced: true } as any,
+        });
+        if ((profile as any)?.isOnline) {
+          socket.join('online-drivers');
+          if ((profile as any)?.isExperienced) {
+            socket.join('experienced-drivers');
+          }
+          logger.info(`Driver ${socket.userId} auto-rejoined online-drivers room on reconnect`);
+        }
+      } catch (err) {
+        logger.warn('Failed to auto-restore driver room membership', { err, userId: socket.userId });
+      }
     }
 
     registerLocationHandlers(io, socket);
@@ -52,6 +77,11 @@ export const initializeSocket = (io: Server) => {
     registerSupportHandlers(io, socket);
 
     socket.on('disconnect', () => {
+      // NOTE: We intentionally do NOT mark the driver offline here.
+      // The driver stays online in DB (isOnline=true) until they explicitly
+      // press the Offline button in the app (which emits driver:offline).
+      // The background location task will reconnect the socket and the
+      // auto-rejoin logic above will restore their online-drivers room membership.
       logger.info(`User disconnected: ${socket.userId}`);
     });
   });

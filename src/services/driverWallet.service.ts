@@ -356,15 +356,17 @@ export class DriverWalletService {
      * Get driver's wallet transaction history
      */
     static async getTransactionHistory(userId: string, limit = 50) {
-        // Get booking earnings — only wallet-affecting rides (non-CASH payment methods).
-        // For CASH rides: the cash is collected physically by the driver (never enters wallet).
-        // The platform subsidy for CASH rides is shown separately as PLATFORM_SUBSIDY.
-        const bookings = await prisma.booking.findMany({
+        // Fetch ALL completed bookings for this driver.
+        // We need ALL of them to generate PLATFORM_FEE entries (applicable to every ride).
+        // We will only emit RIDE_EARNING entries for non-CASH rides:
+        //   - CASH rides: cash is collected physically by driver (never enters wallet).
+        //     Wallet is affected by: PLATFORM_FEE (deducted) + PLATFORM_SUBSIDY (credited).
+        //   - Non-CASH rides: the earning IS credited to wallet.
+        //     Wallet is affected by: RIDE_EARNING (credited) + PLATFORM_FEE (deducted).
+        const allBookings = await prisma.booking.findMany({
             where: {
                 driverId: userId,
                 status: 'COMPLETED',
-                // CASH rides: cash never hits wallet. Only wallet/UPI/card earnings are wallet credits.
-                paymentMethod: { not: 'CASH' } as any,
             },
             select: {
                 id: true,
@@ -390,6 +392,7 @@ export class DriverWalletService {
         });
 
         // Get tips received
+
         const tips = await prisma.tip.findMany({
             where: { driverId: userId, status: 'PAID' },
             orderBy: { createdAt: 'desc' },
@@ -448,34 +451,39 @@ export class DriverWalletService {
             if (f.bookingId) feeByBookingId[f.bookingId] = Number(f.amount);
         }
 
-        for (const b of bookings) {
+        for (const b of allBookings) {
+            const isCashRide = String((b as any).paymentMethod || '').toUpperCase() === 'CASH';
             const tripFee = feeByBookingId[b.id] ?? (PLATFORM_FEES[(b as any).tripType?.toUpperCase()] ?? 0);
             const pb = typeof (b as any).pricingBreakdown === 'object' && (b as any).pricingBreakdown
                 ? (b as any).pricingBreakdown as any : {};
             const subsidy = Number(pb?.platformSubsidy ?? pb?.discounts?.platformSubsidy ?? 0);
 
-            transactions.push({
-                id: b.id,
-                type: 'RIDE_EARNING',
-                amount: Number(b.driverEarnings),
-                description: `Ride #${b.bookingNumber?.slice(0, 8) ?? b.id.slice(0, 8)}`,
-                subtext: b.pickupAddress
-                    ? `${(b.pickupAddress as string).substring(0, 40)}...`
-                    : undefined,
-                commission: Number(b.platformCommission),
-                platformFee: tripFee,
-                platformSubsidy: subsidy,
-                customerFare: Number(b.totalAmount), // what customer paid
-                date: b.completedAt || new Date(),
-            });
-            // Platform fee deduction as separate line
+            // RIDE_EARNING: only for wallet/UPI/card rides (cash stays with driver physically)
+            if (!isCashRide) {
+                transactions.push({
+                    id: b.id,
+                    type: 'RIDE_EARNING',
+                    amount: Number(b.driverEarnings),
+                    description: `Ride #${b.bookingNumber?.slice(0, 8) ?? b.id.slice(0, 8)}`,
+                    subtext: b.pickupAddress
+                        ? `${(b.pickupAddress as string).substring(0, 40)}...`
+                        : undefined,
+                    commission: Number(b.platformCommission),
+                    platformFee: tripFee,
+                    platformSubsidy: subsidy,
+                    customerFare: Number(b.totalAmount), // what customer paid
+                    date: b.completedAt || new Date(),
+                });
+            }
+
+            // PLATFORM_FEE: applies to ALL rides (cash and non-cash both deduct from wallet)
             if (tripFee > 0) {
                 transactions.push({
                     id: `fee_${b.id}`,
                     type: 'PLATFORM_FEE',
                     amount: -tripFee,
                     description: `Platform fee — Ride #${b.bookingNumber?.slice(0, 8) ?? b.id.slice(0, 8)}`,
-                    subtext: `${(b as any).tripType ?? ''} trip charge`,
+                    subtext: `${isCashRide ? 'Cash' : (b as any).paymentMethod} ${(b as any).tripType ?? ''} trip charge`,
                     date: b.completedAt || new Date(),
                 });
             }
