@@ -281,6 +281,7 @@ export class BookingService {
         dropLocationLat: true,
         dropLocationLng: true,
         totalAmount: true,
+        driverEarnings: true,
         vehicleType: true,
         transmissionType: true,
         tripType: true,
@@ -288,6 +289,7 @@ export class BookingService {
         estimatedDuration: true,
         rejectedDriverIds: true,
         requireExperienced: true,
+        experiencedDriverFee: true,
       } as any,
     });
 
@@ -300,15 +302,9 @@ export class BookingService {
           return null;
         }
 
-        const requireExperienced = Boolean((b as any).requireExperienced);
-        const isExperienced = Boolean((driver as any).isExperienced);
-        if (requireExperienced && !isExperienced) {
-          const bookingTime = new Date((b as any).createdAt).getTime();
-          const minutesElapsed = (Date.now() - bookingTime) / (1000 * 60);
-          if (minutesElapsed < 15) {
-            return null;
-          }
-        }
+        // Broadcast to ALL drivers immediately — no 15-minute wait.
+        // If a non-experienced driver accepts, the ₹75 fee is stripped at acceptance time.
+        // This maximises driver availability while being fair to all.
 
         const pickupLat = Number(b.pickupLocationLat);
         const pickupLng = Number(b.pickupLocationLng);
@@ -358,7 +354,13 @@ export class BookingService {
                 address: b.dropAddress,
               }
               : null,
-          fare: typeof b.totalAmount === 'number' ? Number(b.totalAmount) : Number(b.totalAmount || 0),
+          // Driver sees their FULL earnings (platform absorbs discounts).
+          // If booking requires experienced driver, driverEarnings includes the ₹75 fee.
+          // If a normal driver ends up accepting, the fee is stripped at that time.
+          fare: Number((b as any).driverEarnings || b.totalAmount || 0),
+          customerFare: Number(b.totalAmount || 0),
+          requireExperienced: Boolean((b as any).requireExperienced),
+          experiencedDriverFee: Number((b as any).experiencedDriverFee || 0),
           vehicleType: b.vehicleType ?? undefined,
           transmissionType: (b as any).transmissionType ?? undefined,
           createdAt,
@@ -766,22 +768,29 @@ export class BookingService {
         driverId: true,
         status: true,
         scheduledTime: true,
-      },
+        requireExperienced: true,
+        experiencedDriverFee: true,
+        totalAmount: true,
+        driverEarnings: true,
+        discountAmount: true,
+        platformCommission: true,
+        pricingBreakdown: true,
+      } as any,
     });
 
     if (!booking) {
       throw new AppError('Booking not found', 404);
     }
 
-    if (booking.driverId && booking.driverId === params.driverId) {
+    if ((booking as any).driverId && (booking as any).driverId === params.driverId) {
       return { bookingId: params.bookingId };
     }
 
-    if (booking.driverId) {
+    if ((booking as any).driverId) {
       throw new AppError('Booking already assigned', 409);
     }
 
-    if (booking.status !== BookingStatus.SEARCHING && booking.status !== BookingStatus.REQUESTED) {
+    if ((booking as any).status !== BookingStatus.SEARCHING && (booking as any).status !== BookingStatus.REQUESTED) {
       throw new AppError('Booking is not available for acceptance', 409);
     }
 
@@ -812,8 +821,8 @@ export class BookingService {
       throw new AppError('Booking already accepted by another driver', 409);
     }
 
-    // Fetch driver user info + update availability in parallel
-    const [driverUser] = await Promise.all([
+    // Fetch driver profile (isExperienced) + user info + update availability in parallel
+    const [driverUser, driverProfile] = await Promise.all([
       prisma.user.findUnique({
         where: { id: params.driverId },
         select: {
@@ -827,11 +836,61 @@ export class BookingService {
           userType: true,
         },
       }),
+      prisma.driverProfile.findUnique({
+        where: { userId: params.driverId },
+        select: { isExperienced: true } as any,
+      }),
       prisma.driverProfile.update({
         where: { userId: params.driverId },
         data: { isAvailable: false } as any,
       }),
     ]);
+
+    // ── Experienced driver fee adjustment ────────────────────────────────────
+    // If customer requested an experienced driver but a NORMAL driver accepted,
+    // strip the ₹75 fee immediately and notify the customer with the new fare.
+    const bookingRequiredExperienced = Boolean((booking as any).requireExperienced);
+    const driverIsExperienced = Boolean((driverProfile as any)?.isExperienced);
+    const existingExpFee = Math.max(0, Number((booking as any).experiencedDriverFee || 0));
+    let fareWasAdjusted = false;
+    let newTotalAmount = Number((booking as any).totalAmount || 0);
+    let newDriverEarnings = Number((booking as any).driverEarnings || 0);
+
+    if (bookingRequiredExperienced && !driverIsExperienced && existingExpFee > 0) {
+      // Strip the experienced driver fee — customer gets a refund-of-expectation
+      newTotalAmount = Math.max(0, Math.round((Number((booking as any).totalAmount || 0) - existingExpFee) * 100) / 100);
+      newDriverEarnings = Math.max(0, Math.round((Number((booking as any).driverEarnings || 0) - existingExpFee) * 100) / 100);
+
+      // Recompute platformSubsidy after fee removal
+      const pb = typeof (booking as any).pricingBreakdown === 'object' && (booking as any).pricingBreakdown
+        ? (booking as any).pricingBreakdown as any : {};
+
+      await prisma.booking.update({
+        where: { id: params.bookingId },
+        data: {
+          totalAmount: newTotalAmount,
+          driverEarnings: newDriverEarnings,
+          requireExperienced: false,    // booking is now fulfilled by a normal driver
+          experiencedDriverFee: 0,      // fee removed
+          pricingBreakdown: {
+            ...pb,
+            experiencedDriverFee: 0,
+            experiencedDriverFeeRemoved: existingExpFee,
+            fareAdjustedAt: new Date().toISOString(),
+            fareAdjustedReason: 'Normal driver accepted — experienced driver fee removed',
+          } as any,
+        } as any,
+      });
+
+      fareWasAdjusted = true;
+      logger.info('[acceptBooking] Experienced driver fee stripped — normal driver accepted', {
+        bookingId: params.bookingId,
+        driverId: params.driverId,
+        strippedFee: existingExpFee,
+        newTotalAmount,
+        newDriverEarnings,
+      });
+    }
 
     // Single re-read with driver+customer included — used for socket AND return
     const acceptedBooking = await prisma.booking.findUnique({
@@ -865,6 +924,8 @@ export class BookingService {
         platformCommission: true,
         driverEarnings: true,
         commissionPercentage: true,
+        requireExperienced: true,
+        experiencedDriverFee: true,
         otp: true,
         customer: {
           select: {
@@ -877,10 +938,32 @@ export class BookingService {
             totalRatings: true,
           },
         },
-      },
+      } as any,
     });
 
     const io = getSocketServer();
+
+    // If fare was adjusted (normal driver took experienced booking), notify customer FIRST
+    // so they see the new lower price before the driver details appear.
+    if (fareWasAdjusted) {
+      io.to(`user:${booking.customerId}`).emit('booking:fare-updated', {
+        bookingId: params.bookingId,
+        totalAmount: newTotalAmount,
+        discountAmount: Number((booking as any).discountAmount || 0),
+        reason: 'experienced_driver_unavailable',
+        message: `An experienced driver was not available. The ₹${existingExpFee} experienced driver fee has been removed. New fare: ₹${newTotalAmount}.`,
+        fareReduced: existingExpFee,
+      });
+
+      try {
+        await sendExpoPushNotification({
+          userIds: [String(booking.customerId)],
+          title: '💰 Fare Updated',
+          body: `Experienced driver unavailable. ₹${existingExpFee} removed. New fare: ₹${newTotalAmount}.`,
+          data: { kind: 'fare_updated', bookingId: String(params.bookingId) },
+        });
+      } catch { }
+    }
 
     // Emit to customer with FULL driver + booking data (eliminates REST re-fetch)
     io.to(`user:${booking.customerId}`).emit('booking:accepted', {
@@ -888,6 +971,9 @@ export class BookingService {
       driverId: params.driverId,
       driver: driverUser,
       booking: acceptedBooking,
+      fareAdjusted: fareWasAdjusted
+        ? { reason: 'experienced_driver_unavailable', fareReduced: existingExpFee, newTotal: newTotalAmount }
+        : undefined,
     });
     // Emit to driver (lightweight)
     io.to(`user:${params.driverId}`).emit('booking:accepted', {
@@ -916,8 +1002,8 @@ export class BookingService {
       });
     } catch { }
 
-    invalidateBookingCaches([booking.customerId, params.driverId]);
-    return { booking: acceptedBooking };
+    invalidateBookingCaches([String((booking as any).customerId), params.driverId]);
+    return { booking: acceptedBooking, fareAdjusted: fareWasAdjusted };
   };
 
   static getActiveBookingForUser = async (userId: string) => {
