@@ -356,11 +356,15 @@ export class DriverWalletService {
      * Get driver's wallet transaction history
      */
     static async getTransactionHistory(userId: string, limit = 50) {
-        // Get booking earnings
+        // Get booking earnings — only wallet-affecting rides (non-CASH payment methods).
+        // For CASH rides: the cash is collected physically by the driver (never enters wallet).
+        // The platform subsidy for CASH rides is shown separately as PLATFORM_SUBSIDY.
         const bookings = await prisma.booking.findMany({
             where: {
                 driverId: userId,
                 status: 'COMPLETED',
+                // CASH rides: cash never hits wallet. Only wallet/UPI/card earnings are wallet credits.
+                paymentMethod: { not: 'CASH' } as any,
             },
             select: {
                 id: true,
@@ -372,6 +376,7 @@ export class DriverWalletService {
                 pickupAddress: true,
                 dropAddress: true,
                 tripType: true,
+                paymentMethod: true,
             },
             orderBy: { completedAt: 'desc' },
             take: limit,

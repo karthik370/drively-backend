@@ -318,15 +318,15 @@ export class DriverController {
       start.setHours(0, 0, 0, 0);
     }
 
-    const [profile, bookings] = await Promise.all([
+    const [profile, periodBookings, allTimeAgg] = await Promise.all([
       prisma.driverProfile.findUnique({
         where: { userId: req.user.id },
         select: {
-          totalEarnings: true,
           pendingEarnings: true,
           totalTrips: true,
         },
       }),
+      // Bookings for the requested period (today/week/month)
       prisma.booking.findMany({
         where: {
           driverId: req.user.id,
@@ -339,13 +339,22 @@ export class DriverController {
           completedAt: true,
         },
       }),
+      // All-time total: aggregate SUM of driverEarnings from all completed bookings.
+      // profile.totalEarnings is only incremented for UPI/CARD/WALLET payments —
+      // CASH trips are excluded (cash goes directly to driver; only the subsidy hits wallet).
+      // Summing driverEarnings directly gives the real all-time number regardless of payment method.
+      prisma.booking.aggregate({
+        where: { driverId: req.user.id, status: 'COMPLETED' } as any,
+        _sum: { driverEarnings: true },
+      }),
     ]);
 
     if (!profile) {
       throw new AppError('Driver profile not found', 404);
     }
 
-    const earnings = bookings.reduce((sum, b) => sum + Number(b.driverEarnings || 0), 0);
+    const periodEarnings = periodBookings.reduce((sum, b) => sum + Number(b.driverEarnings || 0), 0);
+    const allTimeTotal = Number(allTimeAgg._sum?.driverEarnings || 0);
 
     res.status(200).json({
       success: true,
@@ -353,13 +362,15 @@ export class DriverController {
         period,
         from: start.toISOString(),
         to: now.toISOString(),
-        earnings: Math.round(earnings),
-        trips: bookings.length,
-        totalEarnings: Number(profile.totalEarnings),
+        earnings: Math.round(periodEarnings),
+        trips: periodBookings.length,
+        // Real all-time total from actual completed bookings (not stale profile field)
+        totalEarnings: Math.round(allTimeTotal),
         pendingEarnings: Number(profile.pendingEarnings),
       },
     });
   });
+
 
   static getEarningsBreakdown = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) {

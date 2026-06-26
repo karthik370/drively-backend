@@ -405,10 +405,13 @@ export class BookingService {
         scheduledTime: true,
         totalAmount: true,
         discountAmount: true,
+        driverEarnings: true,
         paymentMethod: true,
         paymentStatus: true,
         createdAt: true,
         completedAt: true,
+        customerId: true,
+        driverId: true,
         customer: {
           select: {
             id: true,
@@ -444,6 +447,7 @@ export class BookingService {
       bookings: bookings.map((b) => ({
         ...b,
         totalAmount: Number(b.totalAmount || 0),
+        driverEarnings: Number(b.driverEarnings || 0),
         discountAmount: Number(b.discountAmount || 0),
       })),
     };
