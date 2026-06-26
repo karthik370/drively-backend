@@ -281,6 +281,8 @@ export class PaymentService {
       await creditDriverForBooking(booking.id);
 
       // Notify both parties via socket immediately — no polling needed
+      // NOTE: Backend joins users to `user:${userId}` rooms (socketHandler.ts:47),
+      // so we MUST use that prefix. io.to(rawId) emits to a non-existent room.
       try {
         const io = getSocketServer();
         const bookingFull = await prisma.booking.findUnique({
@@ -293,12 +295,12 @@ export class PaymentService {
           amount: Number(bookingFull?.totalAmount || 0),
         };
         if (bookingFull?.driverId) {
-          io.to(bookingFull.driverId).emit('payment_confirmed', payload);
-          logger.info(`[Payment] Notified driver ${bookingFull.driverId} of payment`);
+          io.to(`user:${bookingFull.driverId}`).emit('payment_confirmed', payload);
+          logger.info(`[Payment] Notified driver ${bookingFull.driverId} of payment via user room`);
         }
         if (bookingFull?.customerId) {
-          io.to(bookingFull.customerId).emit('payment_confirmed', payload);
-          logger.info(`[Payment] Notified customer ${bookingFull.customerId} of payment`);
+          io.to(`user:${bookingFull.customerId}`).emit('payment_confirmed', payload);
+          logger.info(`[Payment] Notified customer ${bookingFull.customerId} of payment via user room`);
         }
       } catch (socketErr) {
         logger.warn('[Payment] Socket emit failed (non-critical)', { socketErr });
@@ -346,6 +348,8 @@ export class PaymentService {
     }
 
     if (eventType === 'PAYMENT_SUCCESS_WEBHOOK' || eventType === 'ORDER_PAID_WEBHOOK') {
+      let webhookBookingId: string | null = payment.bookingId ?? null;
+
       await prisma.$transaction(async (tx) => {
         await tx.payment.update({
           where: { id: payment.id },
@@ -361,9 +365,9 @@ export class PaymentService {
           },
         });
 
-        if (payment.bookingId) {
+        if (webhookBookingId) {
           await tx.booking.update({
-            where: { id: payment.bookingId },
+            where: { id: webhookBookingId },
             data: {
               paymentStatus: PaymentStatus.PAID,
               paymentId: payment.id,
@@ -371,12 +375,42 @@ export class PaymentService {
           });
         }
 
-        // Credit driver wallet for online payment
-        if (payment.bookingId) {
-          // Run outside transaction to avoid blocking
-          setTimeout(() => creditDriverForBooking(payment.bookingId!), 100);
+        // Credit driver wallet — runs after transaction to avoid blocking
+        if (webhookBookingId) {
+          setTimeout(() => creditDriverForBooking(webhookBookingId!), 100);
         }
       });
+
+      // Emit payment_confirmed via socket so QR-paid customers see instant confirmation.
+      // This is the MISSING piece: webhook marks DB as PAID but without this emit,
+      // the app only finds out via the 4-second poll cycle.
+      if (webhookBookingId) {
+        try {
+          const io = getSocketServer();
+          const bookingFull = await prisma.booking.findUnique({
+            where: { id: webhookBookingId },
+            select: { customerId: true, driverId: true, totalAmount: true },
+          });
+          if (bookingFull) {
+            const payload = {
+              bookingId: webhookBookingId,
+              paymentStatus: 'PAID',
+              amount: Number(bookingFull.totalAmount || 0),
+              source: 'webhook', // lets mobile know this came from async webhook
+            };
+            if (bookingFull.driverId) {
+              io.to(`user:${bookingFull.driverId}`).emit('payment_confirmed', payload);
+              logger.info(`[Webhook] Notified driver ${bookingFull.driverId} of payment`);
+            }
+            if (bookingFull.customerId) {
+              io.to(`user:${bookingFull.customerId}`).emit('payment_confirmed', payload);
+              logger.info(`[Webhook] Notified customer ${bookingFull.customerId} of payment`);
+            }
+          }
+        } catch (socketErr) {
+          logger.warn('[Webhook] Socket emit failed (non-critical)', { socketErr });
+        }
+      }
     }
 
     return { received: true };
@@ -455,6 +489,7 @@ export class PaymentService {
     // driver already has the physical cash — no wallet credit needed.
 
     // Notify both parties via socket
+    // NOTE: Users are in `user:${userId}` rooms — must use prefix (socketHandler.ts:47)
     try {
       const io = getSocketServer();
       const payload = {
@@ -465,10 +500,10 @@ export class PaymentService {
         amount: Number(booking.totalAmount || 0),
       };
       if (booking.driverId) {
-        io.to(booking.driverId).emit('payment_confirmed', payload);
+        io.to(`user:${booking.driverId}`).emit('payment_confirmed', payload);
       }
       if (booking.customerId) {
-        io.to(booking.customerId).emit('payment_confirmed', payload);
+        io.to(`user:${booking.customerId}`).emit('payment_confirmed', payload);
       }
     } catch (socketErr) {
       logger.warn('[Payment] Cash collect socket emit failed (non-critical)', { socketErr });
