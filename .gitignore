@@ -43,3 +43,7 @@ Thumbs.db
 *.dump
 *.sql
 !prisma/**/*.sql
+
+# One-off maintenance scripts (run locally only, never deploy)
+src/scripts/
+

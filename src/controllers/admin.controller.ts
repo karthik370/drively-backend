@@ -291,6 +291,71 @@ export class AdminController {
     await DriverWalletService.rejectPayout(payoutId, reason);
     res.status(200).json({ success: true, message: 'Payout rejected and driver notified' });
   });
+
+  // ── Manual Wallet Credit ─────────────────────────────────────────────────
+  // POST /admin/wallet/credit  { phone, amount, note? }
+  // Auth: requireAdminAllowlist (only phones in ADMIN_PHONE_NUMBERS env can call this)
+  static manualWalletCredit = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const phone = String(req.body?.phone || '').trim();
+    const amount = Number(req.body?.amount);
+    const note = typeof req.body?.note === 'string' ? req.body.note.trim() : 'Manual admin credit';
+    const adminId = req.user?.id || 'unknown';
+
+    if (!phone) throw new AppError('phone is required', 400);
+    if (!amount || amount <= 0 || amount > 10000) throw new AppError('amount must be between 1 and 10000', 400);
+
+    // Find the driver by phone (last 10 digits match)
+    const last10 = phone.replace(/\D/g, '').slice(-10);
+    const user = await prisma.user.findFirst({
+      where: { phoneNumber: { endsWith: last10 } },
+      include: { driverProfile: true },
+    });
+
+    if (!user) throw new AppError(`No user found with phone ending in ${last10}`, 404);
+    if (!user.driverProfile) throw new AppError('User has no driver profile', 400);
+
+    // Credit wallet + create Payment record for full audit trail
+    await prisma.$transaction(async (tx) => {
+      await (tx.driverProfile as any).update({
+        where: { userId: user.id },
+        data: { walletTopupTotal: { increment: amount } },
+      });
+
+      await tx.payment.create({
+        data: {
+          userId: user.id,
+          amount,
+          paymentMethod: 'WALLET' as any,
+          status: 'PAID' as any,
+          processedAt: new Date(),
+          gatewayTransactionId: `ADMIN_CREDIT_${Date.now()}`,
+          gatewayResponse: {
+            purpose: 'DRIVER_WALLET_TOPUP',
+            note,
+            creditedBy: adminId,
+            amount,
+          } as any,
+        },
+      });
+    });
+
+    // Log with who did it for security audit
+    const { logger } = await import('../utils/logger');
+    logger.info('[Admin] Manual wallet credit', {
+      adminId,
+      adminPhone: req.user?.phoneNumber,
+      targetUserId: user.id,
+      targetPhone: user.phoneNumber,
+      amount,
+      note,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `₹${amount} credited to ${user.firstName} ${user.lastName} (${user.phoneNumber})`,
+      data: { userId: user.id, amount, note },
+    });
+  });
 }
 
 export default AdminController;
