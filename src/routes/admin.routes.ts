@@ -14,4 +14,9 @@ router.post('/driver-verifications/:driverId', AdminController.verifyDriverDocum
 router.get('/refunds/pending', AdminController.getPendingRefunds);
 router.post('/refunds/:refundId/mark-paid', AdminController.markRefundPaid);
 
+// ── Withdrawal / Payout management ──
+router.get('/payouts/pending', AdminController.getPendingPayouts);
+router.post('/payouts/:payoutId/approve', AdminController.approvePayout);
+router.post('/payouts/:payoutId/reject', AdminController.rejectPayout);
+
 export default router;

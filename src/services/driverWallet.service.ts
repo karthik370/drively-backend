@@ -2,8 +2,8 @@ import prisma from '../config/database';
 import crypto from 'crypto';
 import { Prisma, PaymentMethod, PaymentStatus } from '@prisma/client';
 import { AppError } from '../middleware/errorHandler';
-import { initiatePayoutTransfer } from './cashfreePayout';
 import { createCashfreeOrder, verifyCashfreePayment, generateOrderId } from './cashfree';
+import { sendExpoPushNotification } from './expoPush.service';
 import { logger } from '../utils/logger';
 
 /** Trip-type platform fee constants */
@@ -518,19 +518,20 @@ export class DriverWalletService {
             const pStatus = p.status;
             // Only COMPLETED payouts are actual deductions from balance
             const isDeducted = pStatus === 'COMPLETED';
+            const methodSubtext = p.upiId ? `UPI: ${p.upiId}` : p.bankAccountId ? `Bank: ****${p.bankAccountId.slice(-4)}` : 'Bank transfer';
             transactions.push({
                 id: p.id,
                 type: 'PAYOUT',
                 amount: isDeducted ? -Number(p.amount) : Number(p.amount),
                 description:
                     pStatus === 'COMPLETED'
-                        ? 'Withdrawal successful'
+                        ? 'Withdrawal completed'
                         : pStatus === 'PROCESSING'
                             ? 'Withdrawal processing'
                             : pStatus === 'FAILED'
-                                ? 'Withdrawal failed'
-                                : 'Withdrawal requested',
-                subtext: p.upiId ? `UPI: ${p.upiId}` : 'Bank transfer',
+                                ? `Withdrawal declined${p.failureReason ? `: ${p.failureReason.slice(0, 40)}` : ''}`
+                                : 'Withdrawal pending admin approval',
+                subtext: methodSubtext,
                 status: pStatus,
                 date: p.processedAt || p.createdAt,
             });
@@ -574,7 +575,7 @@ export class DriverWalletService {
 
         if (!profile) throw new AppError('Driver profile not found', 404);
 
-        // Update profile if details provided
+        // Save/update UPI or bank details if provided
         if (details && (details.upiId || details.bankAccountNumber)) {
             await prisma.driverProfile.update({
                 where: { userId },
@@ -583,26 +584,29 @@ export class DriverWalletService {
                     ...(details.bankAccountNumber && { bankAccountNumber: details.bankAccountNumber }),
                     ...(details.bankIfscCode && { bankIfscCode: details.bankIfscCode }),
                     ...(details.bankAccountHolderName && { bankAccountHolderName: details.bankAccountHolderName }),
-                }
+                },
             });
-            // Update local profile object so the rest of the function uses it
             if (details.upiId) profile.upiId = details.upiId;
             if (details.bankAccountNumber) profile.bankAccountNumber = details.bankAccountNumber;
             if (details.bankIfscCode) profile.bankIfscCode = details.bankIfscCode;
             if (details.bankAccountHolderName) profile.bankAccountHolderName = details.bankAccountHolderName;
         }
 
+        // Validate payout method details
         if (method === 'UPI' && !profile.upiId) {
             throw new AppError('UPI ID not set. Please provide a valid UPI ID.', 400);
         }
         if (method === 'UPI' && profile.upiId && !profile.upiId.includes('@')) {
             throw new AppError('Invalid UPI ID format. Must be like yourname@upi or 9999999999@ybl', 400);
         }
-        if (method === 'BANK' && !profile.bankAccountNumber) {
-            throw new AppError('Bank account not set. Please provide Bank Details.', 400);
+        if (method === 'BANK' && (!profile.bankAccountNumber || profile.bankAccountNumber.startsWith('PEND'))) {
+            throw new AppError('Bank account not set. Please provide your bank details.', 400);
         }
 
-        // Calculate available balance
+        // Validate minimum
+        if (amount < 100) throw new AppError('Minimum withdrawal amount is ₹100', 400);
+
+        // Calculate withdrawable balance (re-validate server-side)
         const paidOut = await prisma.driverPayout.aggregate({
             where: { driverId: userId, status: 'COMPLETED' },
             _sum: { amount: true },
@@ -611,20 +615,26 @@ export class DriverWalletService {
             where: { driverId: userId, status: { in: ['PENDING', 'PROCESSING'] } },
             _sum: { amount: true },
         });
+        const walletTopupTotal = Number((await prisma.driverProfile.findUnique({
+            where: { userId },
+            select: { walletTopupTotal: true, platformFeesTotal: true } as any,
+        }) as any)?.walletTopupTotal ?? 0);
+        const platformFeesTotal = Number((await prisma.driverProfile.findUnique({
+            where: { userId },
+            select: { platformFeesTotal: true } as any,
+        }) as any)?.platformFeesTotal ?? 0);
 
+        const totalEarnings = Number(profile.totalEarnings || 0);
         const totalPaidOut = Number(paidOut._sum.amount ?? 0);
         const pendingAmount = Number(pendingPayouts._sum.amount ?? 0);
-        const totalEarnings = Number(profile.totalEarnings || 0);
-        const withdrawable = Math.max(0, totalEarnings - totalPaidOut - pendingAmount);
+        const netBalance = totalEarnings + walletTopupTotal - platformFeesTotal - totalPaidOut;
+        const withdrawable = Math.max(0, netBalance - pendingAmount);
 
         if (amount > withdrawable) {
-            throw new AppError(`Insufficient balance. Available: ₹${withdrawable.toFixed(2)}`, 400);
+            throw new AppError(`Insufficient balance. Available to withdraw: ₹${withdrawable.toFixed(0)}`, 400);
         }
 
-        if (amount < 100) {
-            throw new AppError('Minimum withdrawal amount is ₹100', 400);
-        }
-
+        // Create PENDING payout record — amount is now locked
         const now = new Date();
         const payout = await prisma.driverPayout.create({
             data: {
@@ -639,70 +649,226 @@ export class DriverWalletService {
             },
         });
 
-        // Fetch driver name and phone for Cashfree
+        // Fetch driver info for notification
         const user = await prisma.user.findUnique({
             where: { id: userId },
-            select: { firstName: true, lastName: true, phoneNumber: true, email: true },
+            select: { firstName: true, lastName: true, phoneNumber: true },
+        });
+        const driverName = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : 'Driver';
+        const payoutDetail = method === 'UPI'
+            ? `UPI: ${profile.upiId}`
+            : `Bank: ****${profile.bankAccountNumber?.slice(-4)}`;
+
+        // Notify ALL admin users via Expo push
+        // We find admins by looking up the ADMIN_PHONE_NUMBERS env var, then finding their user IDs
+        await DriverWalletService.notifyAdminsOfWithdrawalRequest({
+            payoutId: payout.id,
+            driverName,
+            amount,
+            payoutDetail,
         });
 
-        const beneName = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : 'Driver';
-        const benePhone = user?.phoneNumber || '9999999999';
-        const beneEmail = user?.email || undefined;
+        logger.info('[DriverWallet] Payout requested', { payoutId: payout.id, userId, amount, method });
+        return {
+            payoutId: payout.id,
+            status: 'PENDING',
+            message: 'Withdrawal request sent to admin. You will be notified once processed.',
+        };
+    }
 
-        // Initiate transfer via Cashfree Payouts
+    /**
+     * Notify all admin users when a driver requests a withdrawal.
+     * Looks up admin phone numbers from ADMIN_PHONE_NUMBERS env, finds their user IDs,
+     * then sends Expo push to all of them.
+     */
+    private static async notifyAdminsOfWithdrawalRequest(params: {
+        payoutId: string;
+        driverName: string;
+        amount: number;
+        payoutDetail: string;
+    }): Promise<void> {
         try {
-            const transferId = `PAY_${payout.id.replace(/-/g, '').slice(0, 30)}`;
+            const raw = String(
+                process.env.ADMIN_PHONE_NUMBERS ||
+                process.env.ADMIN_PHONES ||
+                process.env.ADMIN_PHONE ||
+                process.env.ADMIN_ALLOWLIST ||
+                ''
+            ).trim();
+            if (!raw) {
+                logger.warn('[DriverWallet] No ADMIN_PHONE_NUMBERS configured — skipping admin notification');
+                return;
+            }
 
-            const result = await initiatePayoutTransfer({
-                transferId,
-                amount,
-                driverId: userId,
-                transferMode: method === 'UPI' ? 'upi' : 'banktransfer',
-                beneName,
-                benePhone,
-                beneEmail,
-                beneVpa: method === 'UPI' ? (profile.upiId || undefined) : undefined,
-                beneBankAccount: method === 'BANK' ? (profile.bankAccountNumber || undefined) : undefined,
-                beneIfsc: method === 'BANK' ? (profile.bankIfscCode || undefined) : undefined,
-                remarks: `DriveMate withdrawal - ${payout.id}`,
-                forceRecreate: !!(details && (details.upiId || details.bankAccountNumber)),
+            // Normalize to last-10-digits
+            const adminPhones = raw.split(',').map(p => p.replace(/\D/g, '').slice(-10)).filter(p => p.length === 10);
+            if (!adminPhones.length) return;
+
+            // Find admin user IDs by their phone numbers (last 10 digits match)
+            const adminUsers = await prisma.user.findMany({
+                where: {
+                    OR: adminPhones.map(phone => ({ phoneNumber: { endsWith: phone } })),
+                },
+                select: { id: true },
             });
 
-            if (result.status === 'SUCCESS' || result.status === 'PENDING' || result.status === 'RECEIVED') {
-                // Cashfree accepted the transfer
-                await prisma.driverPayout.update({
-                    where: { id: payout.id },
-                    data: {
-                        status: 'PROCESSING',
-                        transactionRef: transferId,
-                    },
-                });
-                return { payoutId: payout.id, status: 'PROCESSING', message: 'Transfer initiated successfully' };
-            } else {
-                // Cashfree rejected the transfer
-                await prisma.driverPayout.update({
-                    where: { id: payout.id },
-                    data: {
-                        status: 'FAILED',
-                        failureReason: result.message || 'Transfer rejected by payment provider',
-                    },
-                });
-                return { payoutId: payout.id, status: 'FAILED', message: result.message || 'Transfer failed' };
+            if (!adminUsers.length) {
+                logger.warn('[DriverWallet] Admin phone numbers found but no matching users in DB');
+                return;
             }
-        } catch (err: any) {
-            logger.error('Cashfree payout initiation failed', { payoutId: payout.id, error: err?.message });
 
-            // Mark as FAILED in DB
-            await prisma.driverPayout.update({
-                where: { id: payout.id },
+            const adminIds = adminUsers.map(u => u.id);
+            await sendExpoPushNotification({
+                userIds: adminIds,
+                title: '💸 New Withdrawal Request',
+                body: `${params.driverName} requested ₹${params.amount.toFixed(0)} — ${params.payoutDetail}`,
                 data: {
-                    status: 'FAILED',
-                    failureReason: err?.message || 'Transfer initiation failed',
+                    kind: 'admin_withdrawal_request',
+                    payoutId: params.payoutId,
+                    screen: 'AdminWithdrawalRequests',
                 },
             });
-
-            return { payoutId: payout.id, status: 'FAILED', message: err?.message || 'Transfer failed' };
+            logger.info('[DriverWallet] Admin notified of withdrawal request', { payoutId: params.payoutId, adminIds });
+        } catch (err: any) {
+            logger.error('[DriverWallet] Failed to notify admins', { error: err?.message });
+            // Non-fatal — don't fail the withdrawal request
         }
+    }
+
+    /**
+     * [ADMIN ONLY] Get all pending withdrawal requests with full driver details.
+     */
+    static async getPendingPayoutsForAdmin() {
+        const payouts = await prisma.driverPayout.findMany({
+            where: { status: { in: ['PENDING', 'PROCESSING'] } },
+            orderBy: { createdAt: 'desc' },
+            select: {
+                id: true,
+                amount: true,
+                status: true,
+                upiId: true,
+                bankAccountId: true,
+                createdAt: true,
+                driverId: true,
+            },
+        });
+
+        // Fetch driver profiles and user info for each payout
+        const driverIds = [...new Set(payouts.map(p => p.driverId))];
+        const [profiles, users] = await Promise.all([
+            prisma.driverProfile.findMany({
+                where: { userId: { in: driverIds } },
+                select: {
+                    userId: true,
+                    upiId: true,
+                    bankAccountNumber: true,
+                    bankIfscCode: true,
+                    bankAccountHolderName: true,
+                } as any,
+            }),
+            prisma.user.findMany({
+                where: { id: { in: driverIds } },
+                select: { id: true, firstName: true, lastName: true, phoneNumber: true },
+            }),
+        ]);
+
+        const profileMap = new Map(profiles.map((p: any) => [p.userId, p]));
+        const userMap = new Map(users.map(u => [u.id, u]));
+
+        return payouts.map(p => {
+            const profile = profileMap.get(p.driverId) as any;
+            const user = userMap.get(p.driverId);
+            const name = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : 'Unknown';
+            return {
+                payoutId: p.id,
+                amount: Number(p.amount),
+                status: p.status,
+                createdAt: p.createdAt,
+                driverId: p.driverId,
+                driverName: name,
+                driverPhone: user?.phoneNumber || '',
+                // UPI or bank stored on the payout at request time
+                upiId: p.upiId || (profile as any)?.upiId || null,
+                bankAccountNumber: p.bankAccountId || (profile as any)?.bankAccountNumber || null,
+                bankIfscCode: (profile as any)?.bankIfscCode || null,
+                bankAccountHolderName: (profile as any)?.bankAccountHolderName || null,
+                payoutMethod: p.upiId ? 'UPI' : 'BANK',
+            };
+        });
+    }
+
+    /**
+     * [ADMIN ONLY] Approve a withdrawal request.
+     * Marks COMPLETED → deducts from wallet (totalPaidOut increases), notifies driver.
+     */
+    static async approvePayout(payoutId: string): Promise<void> {
+        const payout = await prisma.driverPayout.findUnique({
+            where: { id: payoutId },
+            include: { driver: { select: { id: true, firstName: true, lastName: true } } },
+        });
+        if (!payout) throw new AppError('Payout request not found', 404);
+        if (payout.status === 'COMPLETED') throw new AppError('Payout already completed', 400);
+        if (payout.status === 'FAILED') throw new AppError('Payout was already rejected', 400);
+
+        await prisma.driverPayout.update({
+            where: { id: payoutId },
+            data: {
+                status: 'COMPLETED',
+                processedAt: new Date(),
+                transactionRef: `MANUAL_${Date.now()}`,
+            },
+        });
+
+        // Notify the driver
+        await sendExpoPushNotification({
+            userIds: [payout.driverId],
+            title: '✅ Withdrawal Processed',
+            body: `₹${Number(payout.amount).toFixed(0)} has been transferred to your ${payout.upiId ? 'UPI' : 'bank account'}.`,
+            data: {
+                kind: 'payout_approved',
+                payoutId,
+                screen: 'DriverWallet',
+            },
+        });
+
+        logger.info('[DriverWallet] Payout approved by admin', { payoutId, driverId: payout.driverId, amount: Number(payout.amount) });
+    }
+
+    /**
+     * [ADMIN ONLY] Reject a withdrawal request.
+     * Marks FAILED → amount unlocked (FAILED payouts not counted in pendingAmount).
+     */
+    static async rejectPayout(payoutId: string, reason?: string): Promise<void> {
+        const payout = await prisma.driverPayout.findUnique({
+            where: { id: payoutId },
+        });
+        if (!payout) throw new AppError('Payout request not found', 404);
+        if (payout.status === 'COMPLETED') throw new AppError('Cannot reject an already completed payout', 400);
+        if (payout.status === 'FAILED') throw new AppError('Payout already rejected', 400);
+
+        const failureReason = reason?.trim() || 'Rejected by admin';
+
+        await prisma.driverPayout.update({
+            where: { id: payoutId },
+            data: {
+                status: 'FAILED',
+                failureReason,
+            },
+        });
+
+        // Notify the driver — amount is now unlocked
+        await sendExpoPushNotification({
+            userIds: [payout.driverId],
+            title: '❌ Withdrawal Declined',
+            body: `₹${Number(payout.amount).toFixed(0)} withdrawal was declined. Reason: ${failureReason}`,
+            data: {
+                kind: 'payout_rejected',
+                payoutId,
+                screen: 'DriverWallet',
+            },
+        });
+
+        logger.info('[DriverWallet] Payout rejected by admin', { payoutId, driverId: payout.driverId, reason: failureReason });
     }
 
     /**

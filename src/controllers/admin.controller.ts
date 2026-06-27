@@ -266,6 +266,31 @@ export class AdminController {
       data: { refundId: String((updated as any).id) },
     });
   });
+
+  // ── Payout / Withdrawal Management ──────────────────────────────────────
+
+  static getPendingPayouts = asyncHandler(async (_req: AuthRequest, res: Response) => {
+    const { DriverWalletService } = await import('../services/driverWallet.service');
+    const data = await DriverWalletService.getPendingPayoutsForAdmin();
+    res.status(200).json({ success: true, data });
+  });
+
+  static approvePayout = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const payoutId = String(req.params.payoutId || '');
+    if (!payoutId) throw new AppError('payoutId is required', 400);
+    const { DriverWalletService } = await import('../services/driverWallet.service');
+    await DriverWalletService.approvePayout(payoutId);
+    res.status(200).json({ success: true, message: 'Payout approved and driver notified' });
+  });
+
+  static rejectPayout = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const payoutId = String(req.params.payoutId || '');
+    if (!payoutId) throw new AppError('payoutId is required', 400);
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
+    const { DriverWalletService } = await import('../services/driverWallet.service');
+    await DriverWalletService.rejectPayout(payoutId, reason);
+    res.status(200).json({ success: true, message: 'Payout rejected and driver notified' });
+  });
 }
 
 export default AdminController;
