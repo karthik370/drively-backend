@@ -7,10 +7,13 @@ const prisma = new PrismaClient({
     : ['error'],
   datasources: {
     db: {
-      // Cap connection pool — Railway Postgres free tier allows ~25 connections.
-      // Without this, spikes can exhaust the pool and block all queries.
+      // IMPORTANT: Never remove this limit. PostgreSQL can handle max ~100 connections total.
+      // Without a limit, Prisma opens unlimited connections → PostgreSQL crashes with
+      // "FATAL: too many clients already" and the ENTIRE app goes down for everyone.
+      // 25 = safe limit for 1 backend instance on Railway (leaves room for DB admin tools).
+      // If you add more backend instances later, reduce this per instance (e.g., 2 instances = 12 each).
       url: process.env.DATABASE_URL
-        ? `${process.env.DATABASE_URL}${process.env.DATABASE_URL.includes('?') ? '&' : '?'}connection_limit=10&pool_timeout=20`
+        ? `${process.env.DATABASE_URL}${process.env.DATABASE_URL.includes('?') ? '&' : '?'}connection_limit=25&pool_timeout=30`
         : undefined,
     },
   },
