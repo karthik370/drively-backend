@@ -1265,8 +1265,6 @@ export class BookingService {
     bookingId: string;
     userId: string;
     status: BookingStatus;
-    latitude?: number;
-    longitude?: number;
   }) => {
     const booking = await prisma.booking.findUnique({
       where: { id: params.bookingId },
@@ -1292,8 +1290,6 @@ export class BookingService {
         createdAt: true,
         requireExperienced: true,
         experiencedDriverFee: true,
-        pickupLocationLat: true,
-        pickupLocationLng: true,
       } as any,
     }) as any;
 
@@ -1306,42 +1302,6 @@ export class BookingService {
 
     if (!isCustomer && !isDriver) {
       throw new AppError('Not authorized for this booking', 403);
-    }
-
-    if (params.status === BookingStatus.ARRIVED) {
-      if (!isDriver) {
-        throw new AppError('Only driver can mark arrival', 403);
-      }
-
-      let driverLat = params.latitude;
-      let driverLng = params.longitude;
-
-      if (driverLat === undefined || driverLng === undefined) {
-        const driverProfile = await prisma.driverProfile.findUnique({
-          where: { userId: booking.driverId },
-          select: { currentLocationLat: true, currentLocationLng: true },
-        });
-        if (driverProfile) {
-          driverLat = driverProfile.currentLocationLat ? Number(driverProfile.currentLocationLat) : undefined;
-          driverLng = driverProfile.currentLocationLng ? Number(driverProfile.currentLocationLng) : undefined;
-        }
-      }
-
-      if (driverLat !== undefined && driverLng !== undefined) {
-        const pickupLat = Number(booking.pickupLocationLat);
-        const pickupLng = Number(booking.pickupLocationLng);
-
-        if (Number.isFinite(pickupLat) && Number.isFinite(pickupLng)) {
-          const distanceKm = calculateDistance(driverLat, driverLng, pickupLat, pickupLng);
-          const distanceMeters = distanceKm * 1000;
-
-          if (distanceMeters > 500) {
-            throw new AppError('please reach the pickup location first !!', 400);
-          }
-        }
-      } else {
-        throw new AppError('Unable to verify your location. Please ensure location services are enabled.', 400);
-      }
     }
 
     if (params.status === BookingStatus.STARTED) {
