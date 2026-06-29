@@ -32,6 +32,8 @@ const createBookingSchema = Joi.object({
 
 const updateStatusSchema = Joi.object({
   status: Joi.string().valid(...Object.values(BookingStatus)).required(),
+  latitude: Joi.number().min(-90).max(90).optional(),
+  longitude: Joi.number().min(-180).max(180).optional(),
 });
 
 const verifyOtpSchema = Joi.object({
@@ -434,6 +436,8 @@ export class BookingController {
       bookingId,
       userId: req.user.id,
       status: value.status,
+      latitude: value.latitude,
+      longitude: value.longitude,
     });
 
     res.status(200).json({
