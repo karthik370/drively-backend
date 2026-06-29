@@ -1290,6 +1290,8 @@ export class BookingService {
         createdAt: true,
         requireExperienced: true,
         experiencedDriverFee: true,
+        pickupLocationLat: true,
+        pickupLocationLng: true,
       } as any,
     }) as any;
 
@@ -1302,6 +1304,42 @@ export class BookingService {
 
     if (!isCustomer && !isDriver) {
       throw new AppError('Not authorized for this booking', 403);
+    }
+
+    if (params.status === BookingStatus.ARRIVED) {
+      if (!isDriver) {
+        throw new AppError('Only the driver can mark as arrived', 403);
+      }
+
+      // Proximity check: driver must be within 300m of the pickup pin.
+      // (Mobile enforces 200m; the extra 100m here absorbs GPS drift and
+      //  the ~30-second lag between the phone updating driverProfile in DB)
+      const pickupLat = Number(booking.pickupLocationLat);
+      const pickupLng = Number(booking.pickupLocationLng);
+
+      if (Number.isFinite(pickupLat) && Number.isFinite(pickupLng)) {
+        const driverProfile = await prisma.driverProfile.findUnique({
+          where: { userId: params.userId },
+          select: { currentLocationLat: true, currentLocationLng: true } as any,
+        }) as any;
+
+        const driverLat = Number(driverProfile?.currentLocationLat);
+        const driverLng = Number(driverProfile?.currentLocationLng);
+
+        if (Number.isFinite(driverLat) && Number.isFinite(driverLng)) {
+          const distKm = calculateDistance(driverLat, driverLng, pickupLat, pickupLng);
+          const distMeters = distKm * 1000;
+
+          if (distMeters > 300) {
+            throw new AppError(
+              `You are ${Math.round(distMeters)}m away from the pickup location. Please get within 200 meters to mark as arrived.`,
+              400
+            );
+          }
+        }
+        // If driver location is not in DB yet (e.g. just accepted), allow through.
+        // The mobile-side 200m guard is the primary UX protection.
+      }
     }
 
     if (params.status === BookingStatus.STARTED) {
