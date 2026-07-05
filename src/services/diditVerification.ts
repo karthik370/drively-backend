@@ -93,7 +93,7 @@ export const verifyAadhaar = async (
       {
         issuing_state: 'IND',
         services: 'ind_aadhaar',
-        identity_number: aadhaarNumber.trim(),
+        personal_number: aadhaarNumber.trim(),  // Didit uses personal_number for Aadhaar
       },
       { headers: getHeaders(), timeout: 30000 }
     );
@@ -144,24 +144,41 @@ export const verifyAadhaar = async (
       dob: String(sourceData?.dob || sourceData?.date_of_birth || ''),
       gender: String(sourceData?.gender || ''),
       address,
-      aadhaarNumber: String(sourceData?.masked_aadhaar || sourceData?.id_number || ''),
+      aadhaarNumber: String(sourceData?.masked_aadhaar || sourceData?.personal_number || ''),
       rawResponse: data,
     };
   } catch (error: any) {
     if (error instanceof AppError) throw error;
+
+    // ── Handle Didit onboarding requirement ──────────────────────────────────
+    // India KYC services need manual activation in Didit Business Console
+    const errData = error?.response?.data;
+    if (errData?.requires_onboarding?.length > 0) {
+      logger.error('[Didit] India services not activated', {
+        requires_onboarding: errData.requires_onboarding,
+        message: 'Contact Didit support at https://wa.me/+19544659728 to activate ind_aadhaar',
+      });
+      throw new AppError(
+        'Aadhaar verification service is not yet activated. Please contact support.',
+        503
+      );
+    }
+
     logger.error('[Didit] Aadhaar verification failed', {
       status: error?.response?.status,
-      data: error?.response?.data,
+      data: JSON.stringify(errData),
       message: error?.message,
     });
     const msg =
-      error?.response?.data?.detail ||
-      error?.response?.data?.message ||
+      errData?.detail ||
+      errData?.message ||
+      (Array.isArray(errData?.services) ? errData.services[0] : null) ||
       error?.message ||
       'Aadhaar verification failed';
     throw new AppError(msg, error?.response?.status || 502);
   }
 };
+
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── PAN Verification ───────────────────────────────────────────────────────
@@ -189,8 +206,8 @@ export const verifyPanStandalone = async (
       url,
       {
         issuing_state: 'IND',
-        services: 'ind_pan',
-        identity_number: panNumber.toUpperCase().trim(),
+        services: 'ind_pan_permanent_account_number',  // Correct Didit service ID
+        personal_number: panNumber.toUpperCase().trim(),
       },
       { headers: getHeaders(), timeout: 30000 }
     );
@@ -217,19 +234,28 @@ export const verifyPanStandalone = async (
       rawResponse: data,
     };
   } catch (error: any) {
+    const errData = error?.response?.data;
+
+    if (errData?.requires_onboarding?.length > 0) {
+      logger.error('[Didit] PAN service not activated', { requires_onboarding: errData.requires_onboarding });
+      throw new AppError('PAN verification service is not yet activated. Please contact support.', 503);
+    }
+
     logger.error('[Didit] PAN verification failed', {
       status: error?.response?.status,
-      data: error?.response?.data,
+      data: JSON.stringify(errData),
       message: error?.message,
     });
     const msg =
-      error?.response?.data?.detail ||
-      error?.response?.data?.message ||
+      errData?.detail ||
+      errData?.message ||
+      (Array.isArray(errData?.services) ? errData.services[0] : null) ||
       error?.message ||
       'PAN verification failed';
     throw new AppError(msg, error?.response?.status || 502);
   }
 };
+
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── Driving License Verification ───────────────────────────────────────────
@@ -271,9 +297,9 @@ export const verifyDrivingLicenseStandalone = async (
       url,
       {
         issuing_state: 'IND',
-        services: 'ind_driving_license',
-        identity_number: dlNumber.toUpperCase().trim(),
-        dob: formattedDob,
+        services: 'ind_drivers_licence',          // Correct Didit service ID
+        personal_number: dlNumber.toUpperCase().trim(),
+        date_of_birth: formattedDob,              // Didit uses date_of_birth
       },
       { headers: getHeaders(), timeout: 30000 }
     );
@@ -319,6 +345,12 @@ export const verifyDrivingLicenseStandalone = async (
     };
   } catch (error: any) {
     const errData = error?.response?.data;
+
+    if (errData?.requires_onboarding?.length > 0) {
+      logger.error('[Didit] DL service not activated', { requires_onboarding: errData.requires_onboarding });
+      throw new AppError('Driving License verification service is not yet activated. Please contact support.', 503);
+    }
+
     logger.error('[Didit] DL verification failed', {
       status: error?.response?.status,
       data: JSON.stringify(errData),
@@ -327,11 +359,13 @@ export const verifyDrivingLicenseStandalone = async (
     const msg =
       errData?.detail ||
       errData?.message ||
+      (Array.isArray(errData?.services) ? errData.services[0] : null) ||
       error?.message ||
       'Driving License verification failed';
     throw new AppError(`DL verification error: ${msg}`, error?.response?.status || 502);
   }
 };
+
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── Face Match (Selfie vs Document Photo) ─────────────────────────────────
