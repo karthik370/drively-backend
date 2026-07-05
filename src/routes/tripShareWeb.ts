@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+﻿import { Router, Request, Response } from 'express';
 import { TripShareService } from '../services/tripShare.service';
 import { logger } from '../utils/logger';
 
@@ -27,7 +27,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     // Use a separate web-specific key that has Maps JS API enabled with no referrer restrictions
     // Falls back to the same key as mobile (which may have restrictions)
     const googleMapsKey = process.env.GOOGLE_MAPS_WEB_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
-    const appScheme = 'drively';
+    const appScheme = 'drivegaadi';
     const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v2.kurnm.click';
 
     // Determine trip state
@@ -87,8 +87,8 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     const etaContext = ['STARTED', 'IN_PROGRESS'].includes(trip.status) ? 'to drop' : 'away';
 
     const ogDescription = driverName
-      ? escapeHtml(`${trip.customerName}'s ride with ${driverName} — track live on Drively`)
-      : escapeHtml(`Track ${trip.customerName}'s ride live on Drively`);
+      ? escapeHtml(`${trip.customerName}'s ride with ${driverName} — track live on DriveGaadi`)
+      : escapeHtml(`Track ${trip.customerName}'s ride live on DriveGaadi`);
 
     // Build static map URL as guaranteed fallback (works without JS)
     const staticMapMarkers = [
@@ -106,15 +106,15 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Track Ride — Drively</title>
+  <title>Track Ride — DriveGaadi</title>
   <meta name="description" content="${ogDescription}">
 
   <!-- Open Graph for WhatsApp / iMessage / social previews -->
-  <meta property="og:title" content="🚗 Track My Drively Ride">
+  <meta property="og:title" content="🚗 Track My DriveGaadi Ride">
   <meta property="og:description" content="${ogDescription}">
   <meta property="og:type" content="website">
   <meta property="og:url" content="${baseUrl}/track/${shareToken}">
-  <meta property="og:site_name" content="Drively">
+  <meta property="og:site_name" content="DriveGaadi">
 
   <!-- Smart deep link: show app banner on mobile, don't auto-redirect -->
   <script>
@@ -459,15 +459,15 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
   <div class="header">
     <div class="header-brand">
       <div class="logo">D</div>
-      <span>Drively</span>
+      <span>DriveGaadi</span>
     </div>
     <a class="open-app" href="${appScheme}://track/${shareToken}" id="openAppBtn">Open in App</a>
   </div>
 
   <!-- Mobile: sticky "Open in App" banner (shown only by JS when mobile UA detected) -->
   <div id="appBanner">
-    <div class="banner-text"><strong>Drively App</strong> gives you live tracking with voice updates</div>
-    <a class="banner-open" href="drively://track/${shareToken}">Open App</a>
+    <div class="banner-text"><strong>DriveGaadi App</strong> gives you live tracking with voice updates</div>
+    <a class="banner-open" href="drivegaadi://track/${shareToken}">Open App</a>
     <button class="banner-dismiss" onclick="document.getElementById('appBanner').style.display='none'" aria-label="Dismiss">×</button>
   </div>
 
@@ -536,7 +536,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
   <!-- Footer -->
   <div class="footer">
     <a class="download-btn" href="https://play.google.com/store/apps/details?id=com.drively.app" target="_blank">
-      📲 Get Drively App
+      📲 Get DriveGaadi App
     </a>
     <p>Book a professional driver for your car</p>
   </div>
@@ -881,7 +881,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tracking Unavailable — Drively</title>
+  <title>Tracking Unavailable — DriveGaadi</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
   <style>
     body {
@@ -906,7 +906,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
   <div class="icon">🔗</div>
   <h1>Tracking Link Unavailable</h1>
   <p>This tracking link may have expired or the trip has ended. Trip sharing links are only active during an ongoing ride.</p>
-  <a class="btn" href="https://play.google.com/store/apps/details?id=com.drively.app">Get Drively App</a>
+  <a class="btn" href="https://play.google.com/store/apps/details?id=com.drively.app">Get DriveGaadi App</a>
 </body>
 </html>`;
 

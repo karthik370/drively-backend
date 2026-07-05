@@ -1,4 +1,4 @@
-import prisma from '../config/database';
+﻿import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
 import { createCashfreeOrder, verifyCashfreePayment, verifyCashfreeWebhook, generateOrderId } from './cashfree';
@@ -176,7 +176,7 @@ export class PaymentService {
             [driverProfile.user?.firstName, driverProfile.user?.lastName].filter(Boolean).join(' ') || 'Driver'
           );
           const amountStr = Number(booking.totalAmount).toFixed(2);
-          const txnNote = encodeURIComponent(`Drively Ride ${booking.id.slice(-6).toUpperCase()}`);
+          const txnNote = encodeURIComponent(`DriveGaadi Ride ${booking.id.slice(-6).toUpperCase()}`);
           upiQrLink = `upi://pay?pa=${encodeURIComponent(driverUpiId)}&pn=${driverName}&am=${amountStr}&cu=INR&tn=${txnNote}`;
           logger.info('[Payment] Generated driver UPI QR link', { bookingId: booking.id, upiId: driverUpiId });
         } else {
@@ -381,6 +381,26 @@ export class PaymentService {
           setTimeout(() => creditDriverForBooking(webhookBookingId!), 100);
         }
       });
+
+      // ── Subscription activation (Layer 1: webhook path) ──────────────────────────
+      // If this payment was for a driver subscription, activate it now.
+      // bookingId is null for subscription payments.
+      if (!webhookBookingId && payment.userId) {
+        const gw = payment.gatewayResponse as any;
+        if (gw?.purpose === 'DRIVER_SUBSCRIPTION') {
+          try {
+            const { SubscriptionService } = await import('./subscription.service');
+            await SubscriptionService.activateFromPayment(payment.userId, payment.id, cfPaymentId);
+            logger.info('[Webhook] Driver subscription activated', {
+              userId: payment.userId, paymentId: payment.id,
+            });
+          } catch (subErr) {
+            logger.error('[Webhook] Failed to activate subscription after payment', {
+              userId: payment.userId, paymentId: payment.id, error: subErr,
+            });
+          }
+        }
+      }
 
       // Emit payment_confirmed via socket so QR-paid customers see instant confirmation.
       // This is the MISSING piece: webhook marks DB as PAID but without this emit,

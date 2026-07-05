@@ -1,4 +1,4 @@
-import { BookingStatus, CancelledBy, PaymentMethod, PaymentStatus, Prisma, TransmissionType, VehicleType } from '@prisma/client';
+﻿import { BookingStatus, CancelledBy, PaymentMethod, PaymentStatus, Prisma, TransmissionType, VehicleType } from '@prisma/client';
 import prisma from '../config/database';
 
 import { AppError } from '../middleware/errorHandler';
@@ -1815,7 +1815,7 @@ export class BookingService {
         await sendPushWithRetry({
           userIds: [String(booking.customerId)],
           title: '✅ Trip completed!',
-          body: `Your trip has been completed.${fareText} Thank you for riding with Drively!`,
+          body: `Your trip has been completed.${fareText} Thank you for riding with DriveGaadi!`,
           data: { kind: 'booking_status', bookingId: String(params.bookingId), status: 'COMPLETED' },
         });
         // Notify driver

@@ -24,8 +24,8 @@ const prisma = new PrismaClient();
 // ─────────────────────────────────────────────────────────────────
 
 const NOTIFICATION = {
-  title: `Welcome to Drively! 🎉`,
-  body: `Thanks for choosing Drively! You're all set to book your first ride. Share the app with friends — quality rides, wherever you go.`,
+  title: `Welcome to DriveGaadi! 🎉`,
+  body: `Thanks for choosing DriveGaadi! You're all set to book your first ride. Share the app with friends — quality rides, wherever you go.`,
   data: {                                           // ← optional extra data (opens a screen)
     screen: 'Home',                                 //    e.g. 'Home', 'Wallet', 'Offers'
     type: 'broadcast',
@@ -56,7 +56,7 @@ const chunk = (arr, size) => {
 
 async function main() {
   console.log('\n══════════════════════════════════════════════');
-  console.log('  📣  Drively Broadcast Notification Script');
+  console.log('  📣  DriveGaadi Broadcast Notification Script');
   console.log('══════════════════════════════════════════════');
   console.log(`  Audience : ${AUDIENCE}`);
   console.log(`  Title    : ${NOTIFICATION.title}`);

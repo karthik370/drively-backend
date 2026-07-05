@@ -21,6 +21,7 @@ import { setSocketServer } from './socket/io';
 import swaggerDocs from './config/swagger';
 import { initScheduledBookingProcessor } from './services/scheduledBooking.service';
 import { MembershipService } from './services/membership.service';
+import { initPaymentReconciliation } from './services/paymentReconciliation.service';
 
 import authRoutes from './routes/auth.routes';
 import userRoutes from './routes/user.routes';
@@ -399,6 +400,9 @@ const startServer = async () => {
     void initScheduledBookingProcessor().catch((error) => {
       logger.error('Failed to start scheduled booking processor:', error);
     });
+
+    // ── Payment reconciliation: catches webhook-missed subscription payments ──────
+    initPaymentReconciliation();
 
     // Seed default driver badges — runs once per server process only
     void (async () => {

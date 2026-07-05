@@ -1,4 +1,4 @@
-import { Response } from 'express';
+﻿import { Response } from 'express';
 import { randomUUID } from 'crypto';
 import prisma from '../config/database';
 import { AuthRequest } from '../middleware/auth';
@@ -340,8 +340,8 @@ export class UserController {
               // Send directly to this token (guaranteed to exist — just registered above)
               await sendExpoPushNotification({
                 userIds: [req.user!.id],
-                title: `Welcome to Drively, ${firstName}! 🎉`,
-                body: `Thanks for choosing Drively! You're all set to book your first ride. Share the app with friends — quality rides, wherever you go.`,
+                title: `Welcome to DriveGaadi, ${firstName}! 🎉`,
+                body: `Thanks for choosing DriveGaadi! You're all set to book your first ride. Share the app with friends — quality rides, wherever you go.`,
                 data: { kind: 'welcome' },
               });
               logger.info('Sent welcome notification to new user', { userId: req.user!.id });

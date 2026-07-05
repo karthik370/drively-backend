@@ -194,11 +194,11 @@ export class ReferralService {
             return;
         }
 
-        // Guard 2: Minimum trip distance ≥ 0.5 km
+        // Guard 2: Minimum actual trip distance ≥ 5 km
+        // Uses ONLY actualDistance (km driven from STARTED → COMPLETED).
+        // Intentionally ignores estimatedDistance — that's the pre-trip estimate, not real distance.
         const MIN_TRIP_DISTANCE_KM = 5;
-        const actualDist = booking.actualDistance ? Number(booking.actualDistance) : 0;
-        const estimatedDist = booking.estimatedDistance ? Number(booking.estimatedDistance) : 0;
-        const tripDistanceKm = actualDist > 0 ? actualDist : estimatedDist;
+        const tripDistanceKm = booking.actualDistance ? Number(booking.actualDistance) : 0;
         if (tripDistanceKm < MIN_TRIP_DISTANCE_KM) {
             logger.warn('Referral reward BLOCKED: distance too short', {
                 bookingId, userId, tripDistanceKm, requiredKm: MIN_TRIP_DISTANCE_KM,
@@ -206,8 +206,8 @@ export class ReferralService {
             return;
         }
 
-        // Guard 3: Minimum fare ≥ ₹300 (cheapest 1hr package = ₹309 + ₹50 taxes)
-        const MIN_FARE_AMOUNT = 300;
+        // Guard 3: Minimum fare ≥ ₹250
+        const MIN_FARE_AMOUNT = 250;
         const fareAmount = Number(booking.totalAmount || 0);
         if (fareAmount < MIN_FARE_AMOUNT) {
             logger.warn('Referral reward BLOCKED: fare too low', {

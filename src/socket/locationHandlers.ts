@@ -13,6 +13,13 @@ const LIVE_DISTANCE_THROTTLE_MS = 4000;
 const USER_LAST_LOCATION_THROTTLE_MS = 15000;
 const LIVE_FARE_THROTTLE_MS = 30000;
 
+// ── Inactivity auto-offline ───────────────────────────────────────────────
+const DRIVER_INACTIVITY_LIMIT_MS = 3 * 60 * 60 * 1000;  // 3 hours online with no booking
+const INACTIVITY_CHECK_INTERVAL_MS = 5 * 60 * 1000;      // max one check per 5 min per driver
+const DRIVER_ONLINE_SINCE_PREFIX = 'driver_online_since:';
+// Per-driver throttle for the inactivity check (avoids a DB query every location update)
+const lastInactivityCheckByDriver = new Map<string, number>();
+
 const bookingCache = new Map<string, { ts: number; value: any }>();
 const lastEtaTsByBooking = new Map<string, number>();
 const lastDistanceTsByBooking = new Map<string, number>();
@@ -80,6 +87,78 @@ const removeDriverGeo = async (driverId: string) => {
     await redisClient.del(`${DRIVER_META_PREFIX}${driverId}`);
   } catch (error) {
     logger.warn('Failed to remove driver geo in Redis', { error, driverId });
+  }
+};
+
+/**
+ * Auto-offline guard: forces a driver offline if they've been online for
+ * DRIVER_INACTIVITY_LIMIT_MS (3h) with no active booking accepted.
+ * Called from driver:location-update (throttled to once every 5 minutes).
+ */
+const checkAndAutoOffline = async (
+  io: Server,
+  socket: AuthenticatedSocket,
+  driverId: string
+): Promise<void> => {
+  try {
+    if (redisClient.status !== 'ready') return;
+
+    const onlineSinceStr = await redisClient.get(`${DRIVER_ONLINE_SINCE_PREFIX}${driverId}`);
+    if (!onlineSinceStr) return; // Key missing — can't determine — skip
+
+    const onlineSince = Number(onlineSinceStr);
+    if (!Number.isFinite(onlineSince)) return;
+
+    const idleMs = Date.now() - onlineSince;
+    if (idleMs < DRIVER_INACTIVITY_LIMIT_MS) return; // Still under 3 hours — fine
+
+    // Has the driver accepted a booking recently? If so, reset the timer.
+    const activeBooking = await prisma.booking.findFirst({
+      where: {
+        driverId,
+        status: {
+          in: [
+            BookingStatus.ACCEPTED,
+            BookingStatus.DRIVER_ARRIVING,
+            BookingStatus.ARRIVED,
+            BookingStatus.STARTED,
+            BookingStatus.IN_PROGRESS,
+          ],
+        },
+      },
+      select: { id: true } as any,
+    });
+
+    if (activeBooking) {
+      // Driver is actively on a trip — reset the online-since clock
+      await redisClient.setex(`${DRIVER_ONLINE_SINCE_PREFIX}${driverId}`, 4 * 60 * 60, String(Date.now()));
+      return;
+    }
+
+    const idleHours = (idleMs / 3_600_000).toFixed(1);
+    logger.info(`[AutoOffline] Driver ${driverId} idle ${idleHours}h with no bookings — forcing offline`);
+
+    // Force offline in DB
+    await prisma.driverProfile.updateMany({
+      where: { userId: driverId },
+      data: { isOnline: false, isAvailable: false } as any,
+    });
+
+    // Remove from Redis geo pool
+    socket.leave('online-drivers');
+    socket.leave('experienced-drivers');
+    await removeDriverGeo(driverId);
+    await redisClient.del(`${DRIVER_ONLINE_SINCE_PREFIX}${driverId}`);
+
+    // Notify the driver's app so the UI updates immediately
+    io.to(`user:${driverId}`).emit('driver:force_offline', {
+      reason: 'inactivity',
+      message: `You were automatically taken offline after ${idleHours} hours of inactivity. Please go online again when you are ready to accept bookings.`,
+    });
+
+    logger.info(`[AutoOffline] Driver ${driverId} forced offline successfully`);
+  } catch (err) {
+    logger.warn('[AutoOffline] Error during inactivity check', { error: err, driverId });
   }
 };
 
@@ -152,6 +231,16 @@ export const registerLocationHandlers = (io: Server, socket: AuthenticatedSocket
           socket.join('experienced-drivers');
         }
         await setDriverGeo(socket.userId, Number(data.latitude), Number(data.longitude));
+
+        // Track when driver went online (for the 3-hour inactivity auto-offline check)
+        if (redisClient.status === 'ready') {
+          redisClient.setex(
+            `${DRIVER_ONLINE_SINCE_PREFIX}${socket.userId}`,
+            4 * 60 * 60,           // auto-expire after 4h (longer than the 3h limit)
+            String(Date.now())
+          ).catch(() => {});
+        }
+
         logger.info(`Driver ${socket.userId} is now online`);
 
         if (canAcceptNew) {
@@ -178,6 +267,12 @@ export const registerLocationHandlers = (io: Server, socket: AuthenticatedSocket
         socket.leave('online-drivers');
         socket.leave('experienced-drivers');
         await removeDriverGeo(socket.userId);
+
+        // Clear inactivity tracking key
+        if (redisClient.status === 'ready') {
+          redisClient.del(`${DRIVER_ONLINE_SINCE_PREFIX}${socket.userId}`).catch(() => {});
+        }
+
         logger.info(`Driver ${socket.userId} is now offline`);
       } catch (error) {
         logger.error('Failed to set driver offline', { error, userId: socket.userId });
@@ -224,6 +319,15 @@ export const registerLocationHandlers = (io: Server, socket: AuthenticatedSocket
         }
 
         await setDriverGeo(socket.userId, Number(data.latitude), Number(data.longitude));
+
+        // ── Throttled inactivity check ───────────────────────────────────────
+        // Runs at most once every 5 minutes per driver to avoid DB queries on every GPS ping.
+        const nowForCheck = Date.now();
+        const lastCheck = lastInactivityCheckByDriver.get(socket.userId) ?? 0;
+        if (nowForCheck - lastCheck > INACTIVITY_CHECK_INTERVAL_MS) {
+          lastInactivityCheckByDriver.set(socket.userId, nowForCheck);
+          void checkAndAutoOffline(io, socket, socket.userId);
+        }
 
         // Ensure the socket is in online-drivers room.
         // This is the safety net for background reconnects: if the driver's socket

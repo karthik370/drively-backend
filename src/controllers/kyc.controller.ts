@@ -1,12 +1,15 @@
 /**
  * KYC Controller — REST Endpoints
  * ────────────────────────────────
- * POST   /kyc/initiate             → Start KYC flow
- * GET    /kyc/status               → Get current KYC status
- * POST   /kyc/digilocker/initiate  → Create DigiLocker session (Surepass)
- * POST   /kyc/digilocker/check     → Check DigiLocker completion & fetch Aadhaar
- * POST   /kyc/fallback             → Submit PAN/DL manually (Surepass)
- * POST   /kyc/selfie               → Upload selfie + trigger face match
+ * POST   /kyc/initiate       → Start KYC flow
+ * GET    /kyc/status         → Get current KYC status
+ * POST   /kyc/aadhaar        → Verify Aadhaar (Didit DB validation — no OTP)
+ * POST   /kyc/fallback       → Submit PAN/DL numbers (Didit DB validation)
+ * POST   /kyc/selfie         → Upload selfie + trigger face match (Didit)
+ *
+ * Removed (DigiLocker):
+ *   POST   /kyc/digilocker/initiate  → DEPRECATED (returns 410)
+ *   POST   /kyc/digilocker/check     → DEPRECATED (returns 410)
  */
 import { Response } from 'express';
 import { v2 as cloudinary } from 'cloudinary';
@@ -15,14 +18,15 @@ import { AppError, asyncHandler } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import {
   initiateKyc,
-  initiateDigiLocker,
-  checkDigiLockerCompletion,
+  verifyAadhaarDirect,
   verifyMissingDocumentsFallback,
   submitSelfieAndFaceMatch,
   getKycStatus,
+  initiateDigiLocker,
+  checkDigiLockerCompletion,
 } from '../services/kyc.service';
 
-// Configure Cloudinary from Railway env vars
+// Configure Cloudinary from env vars
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -32,7 +36,7 @@ cloudinary.config({
 export class KycController {
   /**
    * POST /kyc/initiate
-   * Starts the KYC verification flow. Returns status DIGILOCKER_PENDING.
+   * Starts the KYC verification flow.
    */
   static initiate = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
@@ -52,36 +56,33 @@ export class KycController {
   });
 
   /**
-   * POST /kyc/digilocker/initiate
-   * Initializes a DigiLocker session via Surepass DigiBoost API.
-   * Returns { sdkToken, clientId, gateway, expirySeconds } for the mobile app SDK.
+   * POST /kyc/aadhaar
+   * Verify Aadhaar number directly via Didit database validation.
+   * No DigiLocker, no OTP, no WebView — just a number.
+   * Body: { aadhaarNumber: string }
    */
-  static digilockerInitiate = asyncHandler(async (req: AuthRequest, res: Response) => {
+  static verifyAadhaar = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
 
-    const result = await initiateDigiLocker(req.user.id);
+    const aadhaarNumber = typeof req.body?.aadhaarNumber === 'string'
+      ? req.body.aadhaarNumber.replace(/\s/g, '').trim()
+      : undefined;
+
+    if (!aadhaarNumber) {
+      throw new AppError('aadhaarNumber is required', 400);
+    }
+
+    // 12 digits only
+    if (!/^\d{12}$/.test(aadhaarNumber)) {
+      throw new AppError('Invalid Aadhaar number. Must be exactly 12 digits.', 400);
+    }
+
+    const result = await verifyAadhaarDirect(req.user.id, aadhaarNumber);
 
     res.status(200).json({
       success: true,
-      message: 'DigiLocker session initialized',
+      message: 'Aadhaar verified successfully',
       data: result,
-    });
-  });
-
-  /**
-   * POST /kyc/digilocker/check
-   * Called after the DigiBoost SDK fires onSuccess on the frontend.
-   * Downloads Aadhaar data using the stored client_id.
-   */
-  static checkDigiLocker = asyncHandler(async (req: AuthRequest, res: Response) => {
-    if (!req.user) throw new AppError('Not authenticated', 401);
-
-    const status = await checkDigiLockerCompletion(req.user.id);
-
-    res.status(200).json({
-      success: true,
-      message: 'DigiLocker status checked',
-      data: status,
     });
   });
 
@@ -102,8 +103,8 @@ export class KycController {
 
   /**
    * POST /kyc/fallback
-   * Submit PAN/DL numbers manually when DigiLocker couldn't fetch them.
-   * Body: { panNumber?: string, dlNumber?: string }
+   * Submit PAN and/or DL numbers for verification via Didit.
+   * Body: { panNumber?: string, dlNumber?: string, dob?: string }
    */
   static fallback = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
@@ -135,14 +136,14 @@ export class KycController {
 
     res.status(200).json({
       success: true,
-      message: 'Fallback verification processed',
+      message: 'Verification processed',
       data: status,
     });
   });
 
   /**
    * POST /kyc/selfie
-   * Upload selfie (base64) and run face match + liveness.
+   * Upload selfie (base64) and run face match via Didit.
    * Body: { base64: string, mimeType: string }
    */
   static submitSelfie = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -159,13 +160,10 @@ export class KycController {
       throw new AppError('Invalid mimeType for selfie', 400);
     }
 
-    // Run face match first using raw base64 — DO NOT upload to Cloudinary yet
-    // selfieUrl is temporarily a data URI; Cloudinary upload only happens on success
     const tempSelfieRef = `data:${mime};base64,${base64}`;
     const result = await submitSelfieAndFaceMatch(req.user.id, tempSelfieRef, base64);
 
     // Only upload to Cloudinary if face match PASSED and KYC is completed
-    // This prevents unverified photos from polluting the driver's profile
     if (result.kycCompleted) {
       try {
         const folder = `drivemate/${req.user.id}/kyc-selfie`;
@@ -184,7 +182,6 @@ export class KycController {
         const selfieUrl = uploadResult.secure_url;
         logger.info('[KYC] Verified selfie uploaded to Cloudinary', { url: selfieUrl });
 
-        // Update profile image now that we have the permanent Cloudinary URL
         await import('../config/database').then(({ default: prisma }) =>
           prisma.user.update({
             where: { id: req.user!.id },
@@ -193,7 +190,6 @@ export class KycController {
         );
         logger.info('[KYC] Driver profile image updated with verified selfie', { userId: req.user.id });
       } catch (err: any) {
-        // Non-fatal — KYC is still completed, profile image can be set later
         logger.error('[KYC] Cloudinary upload failed after face match', { error: err?.message });
       }
     } else {
@@ -210,6 +206,25 @@ export class KycController {
         : 'Face verification processed',
       data: result,
     });
+  });
+
+  /**
+   * POST /kyc/digilocker/initiate  — DEPRECATED
+   * DigiLocker is no longer used. Returns 410 Gone.
+   */
+  static digilockerInitiate = asyncHandler(async (req: AuthRequest, _res: Response) => {
+    if (!req.user) throw new AppError('Not authenticated', 401);
+    // Calls the stub which throws 410
+    await initiateDigiLocker(req.user.id);
+  });
+
+  /**
+   * POST /kyc/digilocker/check  — DEPRECATED
+   * DigiLocker is no longer used. Returns 410 Gone.
+   */
+  static checkDigiLocker = asyncHandler(async (req: AuthRequest, _res: Response) => {
+    if (!req.user) throw new AppError('Not authenticated', 401);
+    await checkDigiLockerCompletion(req.user.id);
   });
 }
 

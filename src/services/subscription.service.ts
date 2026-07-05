@@ -191,4 +191,68 @@ export class SubscriptionService {
             };
         });
     }
+
+    /**
+     * activateFromPayment — called by the webhook handler and reconciliation job
+     * when we already KNOW the payment succeeded (no need to re-query Cashfree).
+     * Idempotent: safe to call multiple times for the same payment.
+     */
+    static async activateFromPayment(
+        driverId: string,
+        paymentId: string,
+        cfPaymentId?: string | null,
+    ): Promise<void> {
+        await prisma.$transaction(async (tx) => {
+            const sub = await tx.driverSubscription.findUnique({
+                where: { driverId },
+            });
+
+            // Guard: already active with a future expiry — nothing to do
+            if (
+                sub?.status === SubscriptionStatus.ACTIVE &&
+                sub.validUntil &&
+                sub.validUntil > new Date()
+            ) {
+                return;
+            }
+
+            // Mark payment PAID (idempotent — won't error if already PAID)
+            await tx.payment.update({
+                where: { id: paymentId },
+                data: {
+                    status: PaymentStatus.PAID,
+                    processedAt: new Date(),
+                    gatewayResponse: {
+                        ...(sub ? {} : {}),
+                        cfPaymentId: cfPaymentId ?? null,
+                        activatedAt: new Date().toISOString(),
+                    } as any,
+                },
+            });
+
+            const now = new Date();
+            const currentExpiry = sub?.status === SubscriptionStatus.ACTIVE && sub.validUntil && sub.validUntil > now
+                ? sub.validUntil
+                : now;
+            const newValidUntil = new Date(currentExpiry.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+            await tx.driverSubscription.upsert({
+                where: { driverId },
+                update: {
+                    status: SubscriptionStatus.ACTIVE,
+                    validUntil: newValidUntil,
+                    lastPaymentId: paymentId,
+                },
+                create: {
+                    driverId,
+                    status: SubscriptionStatus.ACTIVE,
+                    planPrice: new Prisma.Decimal(50),
+                    validUntil: newValidUntil,
+                    lastPaymentId: paymentId,
+                },
+            });
+
+            logger.info(`[Subscription] Activated for driver ${driverId} until ${newValidUntil.toISOString()}`);
+        });
+    }
 }

@@ -9,11 +9,10 @@ import { redisClient } from '../config/redis';
 const DRIVER_GEO_KEY = 'driver_locations';
 
 // Wave radii — nearest drivers get the offer first
-const WAVE_1_RADIUS_KM = 5;    // Wave 1: drivers within 5km  (immediate)
-const WAVE_2_RADIUS_KM = 12;   // Wave 2: drivers within 12km (after 40s)
-// Wave 3: ALL online drivers via room broadcast (after 80s — last resort)
-
-const WAVE_DELAY_MS = 40_000;  // 40 seconds between waves
+const WAVE_1_RADIUS_KM = 5;    // Wave 1 fallback radius when no nearest-driver data available
+const WAVE_2_RADIUS_KM = 12;   // Wave 2: expand to 12km (after dynamic Wave 1)
+// Wave 3: ALL online drivers via room broadcast (last resort)
+// Wave delays: 25s → Wave 2, 55s → Wave 3 (adaptive based on nearest driver distance)
 
 // ── Dedup guard: prevent duplicate broadcast for the same booking ─────────────
 let lastKickoffRecentBookingsTs = 0;
@@ -57,6 +56,28 @@ const getNearbyDriverIds = async (lat: number, lng: number, radiusKm: number): P
     return (results as string[]).filter(Boolean);
   } catch {
     return [];
+  }
+};
+
+/**
+ * Returns the distance in km to the nearest driver in the Redis geo pool.
+ * Uses GEORADIUS WITHDIST to get the actual distance without a second call.
+ * Returns null if Redis unavailable or no drivers within 50km.
+ */
+const getNearestDriverDistanceKm = async (lat: number, lng: number): Promise<number | null> => {
+  if (redisClient.status !== 'ready') return null;
+  try {
+    // WITHDIST returns [[memberId, distStr], ...]
+    const results = await (redisClient as any).georadius(
+      DRIVER_GEO_KEY, lng, lat, 50, 'km', 'WITHDIST', 'ASC', 'COUNT', 1
+    );
+    if (!Array.isArray(results) || results.length === 0) return null;
+    const entry = results[0];
+    const distStr = Array.isArray(entry) ? entry[1] : null;
+    const dist = Number(distStr);
+    return Number.isFinite(dist) ? dist : null;
+  } catch {
+    return null;
   }
 };
 
@@ -337,14 +358,23 @@ export class MatchingService {
       }
     } catch { /* non-fatal — favorites are best-effort */ }
 
-    // ── 7. Wave 1: nearest 5km drivers (IMMEDIATE) ────────────────────────────
-    const wave1Drivers = await getNearbyDriverIds(pickupLat, pickupLng, WAVE_1_RADIUS_KM);
+    // ── 7. Smart Adaptive Wave Matching ─────────────────────────────────────────────────
+    //
+    // Strategy: find the NEAREST available driver's distance first, then set
+    // Wave 1 radius to always include that driver (nearest distance + 2km buffer).
+    // This eliminates the "wait 40s for Wave 2" delay when the nearest driver
+    // is just outside the old fixed 5km radius.
+    //
+    //   Nearest driver at 1km  →  Wave 1 = 3km  (tight, fast)
+    //   Nearest driver at 4km  →  Wave 1 = 6km  (includes him + buffer)
+    //   Nearest driver at 9km  →  Wave 1 = 10km (max cap)
+    //   No driver within 50km  →  Wave 1 = 5km fallback + immediate escalation
+
     const redisGeoAvailable = redisClient.status === 'ready';
 
-    if (!redisGeoAvailable || wave1Drivers.length === 0) {
-      // Redis geo unavailable or no drivers found in geo index:
-      // Fall back to the safe room broadcast (original behavior).
-      logger.info('[Matching] No geo data — falling back to room broadcast', { bookingId, redisGeoAvailable });
+    if (!redisGeoAvailable) {
+      // Redis geo unavailable — fall back to safe room broadcast
+      logger.info('[Matching] Redis unavailable — falling back to room broadcast', { bookingId });
       const fallbackRoom = requireExperienced ? 'experienced-drivers' : 'online-drivers';
       const io = getSocketServer();
       io.to(fallbackRoom).emit('booking:offer', offerPayload);
@@ -352,22 +382,80 @@ export class MatchingService {
       return;
     }
 
-    logger.info(`[Matching] Wave 1 (0-${WAVE_1_RADIUS_KM}km): ${wave1Drivers.length} geo candidates`, { bookingId });
+    // Find nearest driver's actual distance
+    const nearestKm = await getNearestDriverDistanceKm(pickupLat, pickupLng);
+
+    // Dynamic Wave 1 radius: nearest driver distance + 2km buffer, clamped [3km, 10km]
+    const dynamicWave1Km = nearestKm !== null
+      ? Math.min(Math.max(nearestKm + 2, 3), 10)
+      : WAVE_1_RADIUS_KM;
+
+    logger.info(
+      `[Matching] Nearest driver: ${nearestKm?.toFixed(1) ?? 'none'}km → Wave 1 radius = ${dynamicWave1Km}km`,
+      { bookingId }
+    );
+
+    const wave1Drivers = await getNearbyDriverIds(pickupLat, pickupLng, dynamicWave1Km);
+
+    if (wave1Drivers.length === 0) {
+      // No drivers in dynamic radius — escalate immediately (no 25s wait)
+      logger.info('[Matching] Wave 1 empty — escalating to Wave 2 immediately', { bookingId });
+
+      const wave2Drivers = await getNearbyDriverIds(pickupLat, pickupLng, WAVE_2_RADIUS_KM);
+
+      if (wave2Drivers.length === 0) {
+        // Absolutely no drivers nearby — broadcast all online immediately
+        logger.info('[Matching] Wave 2 also empty — broadcasting all online drivers now', { bookingId });
+        const fallbackRoom = requireExperienced ? 'experienced-drivers' : 'online-drivers';
+        const io = getSocketServer();
+        io.to(fallbackRoom).emit('booking:offer', offerPayload);
+        await _pushAllOnline(bookingId, requireExperienced, notifiedInSession, booking.pickupAddress);
+        return;
+      }
+
+      // Wave 2 immediate (0-WAVE_2_RADIUS_KM km)
+      await sendWaveOffer({
+        bookingId, offerPayload,
+        nearbyDriverIds: wave2Drivers,
+        rejectedDriverIds, requireExperienced,
+        notifiedInSession, waveName: `Wave 2-immediate (0-${WAVE_2_RADIUS_KM}km)`,
+        sendPush: true, pickupAddress: booking.pickupAddress,
+      });
+
+      // Wave 3 (all) after 30s
+      setTimeout(async () => {
+        try {
+          if (!(await isBookingStillPending(bookingId))) return;
+          logger.info('[Matching] Wave 3 fallback broadcast (after immediate Wave 2)', { bookingId });
+          const fallbackRoom = requireExperienced ? 'experienced-drivers' : 'online-drivers';
+          const io = getSocketServer();
+          io.to(fallbackRoom).emit('booking:offer', offerPayload);
+          await _pushAllOnline(bookingId, requireExperienced, notifiedInSession, booking.pickupAddress);
+        } catch (err) {
+          logger.error('[Matching] Wave 3 error', { bookingId, err });
+        }
+      }, 30_000);
+
+      return;
+    }
+
+    // ── Normal path: Wave 1 has drivers ───────────────────────────────────────
+    logger.info(`[Matching] Wave 1 (0-${dynamicWave1Km}km): ${wave1Drivers.length} drivers`, { bookingId });
 
     await sendWaveOffer({
       bookingId, offerPayload,
       nearbyDriverIds: wave1Drivers,
       rejectedDriverIds, requireExperienced,
-      notifiedInSession, waveName: `Wave 1 (0-${WAVE_1_RADIUS_KM}km)`,
+      notifiedInSession, waveName: `Wave 1 (0-${dynamicWave1Km}km)`,
       sendPush: true, pickupAddress: booking.pickupAddress,
     });
 
-    // ── 8. Wave 2: expand to 12km after 40s (if still unaccepted) ────────────
+    // Wave 2: expand to WAVE_2_RADIUS_KM after 25s (reduced from 40s)
     setTimeout(async () => {
       try {
         if (!(await isBookingStillPending(bookingId))) return;
         const wave2Drivers = await getNearbyDriverIds(pickupLat, pickupLng, WAVE_2_RADIUS_KM);
-        logger.info(`[Matching] Wave 2 (0-${WAVE_2_RADIUS_KM}km): ${wave2Drivers.length} geo candidates`, { bookingId });
+        logger.info(`[Matching] Wave 2 (0-${WAVE_2_RADIUS_KM}km): ${wave2Drivers.length} candidates`, { bookingId });
         await sendWaveOffer({
           bookingId, offerPayload,
           nearbyDriverIds: wave2Drivers,
@@ -378,25 +466,21 @@ export class MatchingService {
       } catch (err) {
         logger.error('[Matching] Wave 2 error', { bookingId, err });
       }
-    }, WAVE_DELAY_MS);
+    }, 25_000); // 25s (was 40s)
 
-    // ── 9. Wave 3: broadcast to ALL online drivers after 80s (last resort) ────
+    // Wave 3: broadcast ALL after 55s total (was 80s)
     setTimeout(async () => {
       try {
         if (!(await isBookingStillPending(bookingId))) return;
-
         const fallbackRoom = requireExperienced ? 'experienced-drivers' : 'online-drivers';
-        logger.info(`[Matching] Wave 3 fallback: broadcasting to room "${fallbackRoom}"`, { bookingId });
-
+        logger.info(`[Matching] Wave 3 fallback broadcast to "${fallbackRoom}"`, { bookingId });
         const io = getSocketServer();
         io.to(fallbackRoom).emit('booking:offer', offerPayload);
-
-        // Push only drivers not yet notified
         await _pushAllOnline(bookingId, requireExperienced, notifiedInSession, booking.pickupAddress);
       } catch (err) {
-        logger.error('[Matching] Wave 3 fallback error', { bookingId, err });
+        logger.error('[Matching] Wave 3 error', { bookingId, err });
       }
-    }, WAVE_DELAY_MS * 2);
+    }, 55_000); // 55s total (25 + 30)
   };
 }
 
