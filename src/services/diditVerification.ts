@@ -17,8 +17,10 @@
  *   This replaces the DigiLocker multi-step OTP flow entirely.
  */
 import axios from 'axios';
+import FormData from 'form-data';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
+
 
 // ── Config ─────────────────────────────────────────────────────────────────
 const getDiditConfig = () => {
@@ -363,6 +365,121 @@ export const verifyDrivingLicenseStandalone = async (
       error?.message ||
       'Driving License verification failed';
     throw new AppError(`DL verification error: ${msg}`, error?.response?.status || 502);
+  }
+};
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// ── DL Photo Scan — Extract Face from Driving License ─────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// POST /v3/id-verification/  (multipart/form-data)
+// Sends front image of DL → Didit OCR extracts: name, DL number, face photo
+// We use the extracted face photo as reference for face match.
+// save_api_request=false → portrait returned inline as base64 in response.
+
+export type DLScanResult = {
+  valid: boolean;
+  facePhotoBase64: string | null; // extracted face from DL card
+  dlNumber: string;
+  name: string;
+  dob: string;
+  expiryDate: string;
+  rawResponse: any;
+};
+
+export const scanDLForFace = async (
+  dlFrontImageBase64: string
+): Promise<DLScanResult> => {
+  const { baseUrl, apiKey } = getDiditConfig();
+  const url = `${baseUrl}/v3/id-verification/`;
+
+  logger.info('[Didit] Scanning DL front image for face extraction', { url });
+
+  try {
+    // Didit ID verification requires multipart/form-data — not JSON
+    const form = new FormData();
+
+    // Convert base64 to buffer for multipart upload
+    const cleanBase64 = dlFrontImageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const imageBuffer = Buffer.from(cleanBase64, 'base64');
+
+    form.append('front_image', imageBuffer, {
+      filename: 'dl_front.jpg',
+      contentType: 'image/jpeg',
+    });
+
+    // save_api_request=false → face portrait returned inline as base64
+    form.append('save_api_request', 'false');
+
+    const response = await axios.post(url, form, {
+      headers: {
+        ...form.getHeaders(),
+        'x-api-key': apiKey,
+      },
+      timeout: 60000,
+    });
+
+    const data = response.data;
+
+    logger.info('[Didit] DL scan response', {
+      status: data?.id_verification?.status,
+      warnings: data?.id_verification?.warnings,
+      hasFace: Boolean(data?.portrait),
+    });
+
+    const idVerif = data?.id_verification || {};
+    const isValid = idVerif?.status === 'Approved';
+
+    // Extracted fields
+    const extractedData = data?.extracted_data || data?.data || {};
+    const dlNumber = String(
+      extractedData?.document_number ||
+      extractedData?.dl_number ||
+      ''
+    );
+    const name = String(
+      extractedData?.full_name ||
+      `${extractedData?.first_name || ''} ${extractedData?.last_name || ''}`.trim() ||
+      ''
+    );
+    const dob = String(extractedData?.date_of_birth || extractedData?.dob || '');
+    const expiryDate = String(extractedData?.expiration_date || extractedData?.expiry_date || '');
+
+    // Face portrait — returned as base64 when save_api_request=false
+    const facePhotoBase64 = data?.portrait || data?.face_image || null;
+
+    if (facePhotoBase64) {
+      logger.info('[Didit] DL face photo extracted successfully', { dlNumber });
+    } else {
+      logger.warn('[Didit] DL scan completed but no face photo returned', {
+        warnings: idVerif?.warnings,
+      });
+    }
+
+    return {
+      valid: isValid,
+      facePhotoBase64,
+      dlNumber,
+      name,
+      dob,
+      expiryDate,
+      rawResponse: data,
+    };
+  } catch (error: any) {
+    const errData = error?.response?.data;
+
+    logger.error('[Didit] DL scan failed', {
+      status: error?.response?.status,
+      data: JSON.stringify(errData),
+      message: error?.message,
+    });
+
+    const msg =
+      errData?.detail ||
+      errData?.message ||
+      error?.message ||
+      'DL photo scan failed';
+    throw new AppError(msg, error?.response?.status || 502);
   }
 };
 

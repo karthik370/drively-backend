@@ -20,6 +20,7 @@ import {
   initiateKyc,
   verifyAadhaarDirect,
   verifyMissingDocumentsFallback,
+  submitDLPhotoForFaceScan,
   submitSelfieAndFaceMatch,
   getKycStatus,
   initiateDigiLocker,
@@ -138,6 +139,35 @@ export class KycController {
       success: true,
       message: 'Verification processed',
       data: status,
+    });
+  });
+
+  /**
+   * POST /kyc/dl-photo
+   * Upload front photo of physical DL card.
+   * Didit scans it → extracts face → stored as face match reference.
+   * Body: { base64: string, mimeType: string }
+   */
+  static submitDLPhoto = asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (!req.user) throw new AppError('Not authenticated', 401);
+
+    const { base64, mimeType } = req.body || {};
+    if (!base64 || typeof base64 !== 'string') {
+      throw new AppError('base64 DL front image is required', 400);
+    }
+
+    const mime = typeof mimeType === 'string' ? mimeType : 'image/jpeg';
+    const dataUri = base64.startsWith('data:') ? base64 : `data:${mime};base64,${base64}`;
+
+    const result = await submitDLPhotoForFaceScan(req.user.id, dataUri);
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+      data: {
+        faceExtracted: result.faceExtracted,
+        nextStep: 'selfie',
+      },
     });
   });
 

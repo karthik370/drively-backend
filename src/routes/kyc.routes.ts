@@ -22,7 +22,11 @@ router.post('/aadhaar', KycController.verifyAadhaar);
 // Body: { panNumber?: string, dlNumber?: string, dob?: string }
 router.post('/fallback', KycController.fallback);
 
-// Selfie + Face match via Didit
+// NEW: Upload physical DL front photo → Didit OCR → extract face for face match
+// Body: { base64: string, mimeType: string }
+router.post('/dl-photo', KycController.submitDLPhoto);
+
+// Selfie + Face match via Didit (uses DL face photo as reference)
 // Body: { base64: string, mimeType: string }
 router.post('/selfie', KycController.submitSelfie);
 
