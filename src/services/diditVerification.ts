@@ -59,6 +59,12 @@ const normalizeDob = (dob: string): string => {
   return dob; // Assume already YYYY-MM-DD
 };
 
+// ── Dev Bypass Mode ─────────────────────────────────────────────────────────
+// Set KYC_BYPASS=true in Railway env to skip Didit API calls during testing.
+// NEVER enable in production with real users.
+// Remove / set false once Didit activates ind_aadhaar, ind_pan, ind_drivers_licence.
+const isKycBypass = (): boolean => process.env.KYC_BYPASS === 'true';
+
 // ══════════════════════════════════════════════════════════════════════════
 // ── Aadhaar Verification (Database Validation — No OTP) ───────────────────
 // ══════════════════════════════════════════════════════════════════════════
@@ -84,6 +90,12 @@ export const verifyAadhaar = async (
   pan: string,       // Required by Didit alongside Aadhaar number
   userId?: string
 ): Promise<AadhaarVerificationResult> => {
+  // ── DEV BYPASS: remove once Didit activates ind_aadhaar ──────────────────
+  if (isKycBypass()) {
+    logger.warn('[KYC BYPASS] Aadhaar verification SKIPPED — KYC_BYPASS=true', { userId, masked: aadhaarNumber.slice(0, 8) + 'XXXX' });
+    return { verified: true, fullName, dob, gender: '', address: '', aadhaarNumber: aadhaarNumber.slice(0, 8) + 'XXXX', rawResponse: { bypass: true } };
+  }
+
   const { baseUrl, apiKey } = getDiditConfig();
   const url = `${baseUrl}/v3/database-validation/`;
 
@@ -190,6 +202,12 @@ export const verifyPanStandalone = async (
   dob: string,      // YYYY-MM-DD
   userId?: string
 ): Promise<PanVerificationResult> => {
+  // ── DEV BYPASS: remove once Didit activates ind_pan_permanent_account_number ──
+  if (isKycBypass()) {
+    logger.warn('[KYC BYPASS] PAN verification SKIPPED — KYC_BYPASS=true', { userId, pan: panNumber.slice(0, 4) + '***' });
+    return { valid: true, registeredName: fullName, panType: 'Individual', rawResponse: { bypass: true } };
+  }
+
   const { baseUrl, apiKey } = getDiditConfig();
   const url = `${baseUrl}/v3/database-validation/`;
 
@@ -270,6 +288,12 @@ export const verifyDrivingLicenseStandalone = async (
   dob: string,      // YYYY-MM-DD or DD-MM-YYYY — will be normalized
   userId?: string
 ): Promise<DlVerificationResult> => {
+  // ── DEV BYPASS: remove once Didit activates ind_drivers_licence ──────────────
+  if (isKycBypass()) {
+    logger.warn('[KYC BYPASS] DL verification SKIPPED — KYC_BYPASS=true', { userId, dl: dlNumber.slice(0, 4) + '***' });
+    return { valid: true, name: fullName, dob, issueDate: '', expiryDate: '2030-01-01', vehicleClass: ['LMV'], rawResponse: { bypass: true } };
+  }
+
   const { baseUrl, apiKey } = getDiditConfig();
   const url = `${baseUrl}/v3/database-validation/`;
 
