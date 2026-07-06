@@ -71,7 +71,10 @@ export const initiateKyc = async (userId: string, _phoneNumber?: string) => {
 // New: Driver submits Aadhaar number directly (no WebView, no OTP, no DigiLocker)
 export const verifyAadhaarDirect = async (
   userId: string,
-  aadhaarNumber: string
+  aadhaarNumber: string,
+  fullName: string,   // Required by Didit alongside Aadhaar
+  pan: string,        // Required by Didit alongside Aadhaar
+  dob: string         // YYYY-MM-DD
 ) => {
   const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
 
@@ -95,8 +98,8 @@ export const verifyAadhaarDirect = async (
     });
   }
 
-  // Call Didit API
-  const result = await verifyAadhaar(cleaned);
+  // Call Didit API — requires: aadhaar number, full name, DOB, PAN
+  const result = await verifyAadhaar(cleaned, fullName.trim(), dob, pan.trim(), userId);
 
   // Parse DOB
   let aadhaarDob: Date | null = null;
@@ -170,7 +173,7 @@ const normalizeDlNumber = (dl: string): string => {
 // This endpoint handles both PAN and DL verification (the "fallback" route is now the primary route)
 export const verifyMissingDocumentsFallback = async (
   userId: string,
-  input: { panNumber?: string; dlNumber?: string; dob?: string }
+  input: { panNumber?: string; dlNumber?: string; dob?: string; fullName?: string }
 ) => {
   const kyc = await prisma.kycVerification.findUnique({ where: { userId } });
   if (!kyc) {
@@ -194,7 +197,12 @@ export const verifyMissingDocumentsFallback = async (
   // ── Verify PAN ─────────────────────────────────────────────────────────
   if (!kyc.panVerified && input.panNumber) {
     try {
-      const panResult = await verifyPanStandalone(input.panNumber);
+      const panResult = await verifyPanStandalone(
+        input.panNumber,
+        kyc.aadhaarName || input.fullName || '',  // use verified Aadhaar name
+        input.dob || (kyc.aadhaarDob ? kyc.aadhaarDob.toISOString().split('T')[0] : ''),
+        userId
+      );
       if (panResult.valid) {
         const panName = panResult.registeredName;
         const aadhaarName = kyc.aadhaarName || '';
@@ -237,7 +245,12 @@ export const verifyMissingDocumentsFallback = async (
       errors.push('Date of birth is required to verify your Driving License. Please provide your DOB.');
     } else {
       try {
-        const dlResult = await verifyDrivingLicenseStandalone(normalizedDl, dobStr);
+        const dlResult = await verifyDrivingLicenseStandalone(
+          normalizedDl,
+          kyc.aadhaarName || input.fullName || '',  // use verified Aadhaar name
+          dobStr,
+          userId
+        );
         if (dlResult.valid) {
           const dlName = dlResult.name;
           const aadhaarName = kyc.aadhaarName || '';

@@ -59,8 +59,8 @@ export class KycController {
   /**
    * POST /kyc/aadhaar
    * Verify Aadhaar number directly via Didit database validation.
-   * No DigiLocker, no OTP, no WebView — just a number.
-   * Body: { aadhaarNumber: string }
+   * Body: { aadhaarNumber, fullName, pan, dob }
+   * All 4 fields required by Didit's India Aadhaar service.
    */
   static verifyAadhaar = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
@@ -68,17 +68,23 @@ export class KycController {
     const aadhaarNumber = typeof req.body?.aadhaarNumber === 'string'
       ? req.body.aadhaarNumber.replace(/\s/g, '').trim()
       : undefined;
+    const fullName = typeof req.body?.fullName === 'string' ? req.body.fullName.trim() : undefined;
+    const pan      = typeof req.body?.pan === 'string' ? req.body.pan.trim().toUpperCase() : undefined;
+    const dob      = typeof req.body?.dob === 'string' ? req.body.dob.trim() : undefined;
 
-    if (!aadhaarNumber) {
-      throw new AppError('aadhaarNumber is required', 400);
-    }
+    if (!aadhaarNumber) throw new AppError('aadhaarNumber is required', 400);
+    if (!fullName)      throw new AppError('fullName is required (as shown on your Aadhaar card)', 400);
+    if (!pan)          throw new AppError('pan is required alongside Aadhaar for identity verification', 400);
+    if (!dob)          throw new AppError('dob (date of birth, YYYY-MM-DD) is required', 400);
 
-    // 12 digits only
     if (!/^\d{12}$/.test(aadhaarNumber)) {
       throw new AppError('Invalid Aadhaar number. Must be exactly 12 digits.', 400);
     }
+    if (!/^[A-Z]{5}\d{4}[A-Z]$/.test(pan)) {
+      throw new AppError('Invalid PAN format. Example: ABCDE1234F', 400);
+    }
 
-    const result = await verifyAadhaarDirect(req.user.id, aadhaarNumber);
+    const result = await verifyAadhaarDirect(req.user.id, aadhaarNumber, fullName, pan, dob);
 
     res.status(200).json({
       success: true,
@@ -110,9 +116,10 @@ export class KycController {
   static fallback = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!req.user) throw new AppError('Not authenticated', 401);
 
-    const panNumber = typeof req.body?.panNumber === 'string' ? req.body.panNumber.trim() : undefined;
-    const dlNumber = typeof req.body?.dlNumber === 'string' ? req.body.dlNumber.trim() : undefined;
-    const dob = typeof req.body?.dob === 'string' ? req.body.dob.trim() : undefined;
+    const panNumber  = typeof req.body?.panNumber === 'string' ? req.body.panNumber.trim() : undefined;
+    const dlNumber   = typeof req.body?.dlNumber === 'string' ? req.body.dlNumber.trim() : undefined;
+    const dob        = typeof req.body?.dob === 'string' ? req.body.dob.trim() : undefined;
+    const fullName   = typeof req.body?.fullName === 'string' ? req.body.fullName.trim() : undefined;
 
     if (!panNumber && !dlNumber) {
       throw new AppError('At least one of panNumber or dlNumber is required', 400);
@@ -133,7 +140,7 @@ export class KycController {
       throw new AppError('Invalid DOB format. Expected: YYYY-MM-DD', 400);
     }
 
-    const status = await verifyMissingDocumentsFallback(req.user.id, { panNumber, dlNumber, dob });
+    const status = await verifyMissingDocumentsFallback(req.user.id, { panNumber, dlNumber, dob, fullName });
 
     res.status(200).json({
       success: true,

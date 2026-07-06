@@ -25,27 +25,24 @@ import { logger } from '../utils/logger';
 // ── Config ─────────────────────────────────────────────────────────────────
 const getDiditConfig = () => {
   const apiKey = process.env.DIDIT_API_KEY;
-  const env = process.env.DIDIT_ENV === 'PRODUCTION' ? 'PRODUCTION' : 'SANDBOX';
 
   if (!apiKey) {
-    throw new AppError(
-      'Didit API key not configured (DIDIT_API_KEY)',
-      500
-    );
+    throw new AppError('Didit API key not configured (DIDIT_API_KEY)', 500);
   }
 
-  // Didit has one base URL for all standalone verification APIs
   const baseUrl = 'https://verification.didit.me';
-
-  return { apiKey, env, baseUrl };
+  return { apiKey, baseUrl };
 };
 
-const getHeaders = () => {
-  const { apiKey } = getDiditConfig();
-  return {
-    'Content-Type': 'application/json',
-    'x-api-key': apiKey,
-  };
+// ── Helper: Build multipart form ────────────────────────────────────────────
+// Didit database-validation API uses multipart/form-data, NOT JSON.
+// The x-api-key goes in the header; all fields go as form fields.
+const makeForm = (fields: Record<string, string>): FormData => {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    form.append(key, value);
+  }
+  return form;
 };
 
 // ── Helper: DOB normalizer ──────────────────────────────────────────────────
@@ -65,9 +62,10 @@ const normalizeDob = (dob: string): string => {
 // ══════════════════════════════════════════════════════════════════════════
 // ── Aadhaar Verification (Database Validation — No OTP) ───────────────────
 // ══════════════════════════════════════════════════════════════════════════
-// This is a DIRECT database lookup against UIDAI via Didit.
-// Unlike the old SurePass DigiLocker flow, no WebView or OTP is needed.
-// Driver types Aadhaar number → backend validates immediately.
+// Docs: https://docs.didit.me/api-reference/database-validation/india/aadhaar
+// Required: issuing_state, services, consent, full_name, date_of_birth,
+//           personal_number (12-digit Aadhaar), pan
+// All fields sent as multipart/form-data — NOT JSON.
 
 export type AadhaarVerificationResult = {
   verified: boolean;
@@ -75,95 +73,89 @@ export type AadhaarVerificationResult = {
   dob: string;
   gender: string;
   address: string;
-  aadhaarNumber: string; // masked
+  aadhaarNumber: string;
   rawResponse: any;
 };
 
 export const verifyAadhaar = async (
-  aadhaarNumber: string
+  aadhaarNumber: string,
+  fullName: string,
+  dob: string,       // YYYY-MM-DD
+  pan: string,       // Required by Didit alongside Aadhaar number
+  userId?: string
 ): Promise<AadhaarVerificationResult> => {
-  const { baseUrl } = getDiditConfig();
+  const { baseUrl, apiKey } = getDiditConfig();
   const url = `${baseUrl}/v3/database-validation/`;
 
-  // Mask for logging
   const masked = aadhaarNumber.replace(/^(\d{8})(\d{4})$/, 'XXXXXXXX$2');
   logger.info('[Didit] Verifying Aadhaar', { masked, url });
 
+  const form = makeForm({
+    issuing_state:   'IND',
+    services:        'ind_aadhaar',
+    consent:         'true',
+    full_name:       fullName.trim(),
+    date_of_birth:   normalizeDob(dob),
+    personal_number: aadhaarNumber.replace(/\s/g, '').trim(),
+    pan:             pan.trim().toUpperCase(),
+    ...(userId ? { vendor_data: userId } : {}),
+  });
+
   try {
-    const response = await axios.post(
-      url,
-      {
-        issuing_state: 'IND',
-        services: 'ind_aadhaar',
-        personal_number: aadhaarNumber.trim(),  // Didit uses personal_number for Aadhaar
-      },
-      { headers: getHeaders(), timeout: 30000 }
-    );
+    const response = await axios.post(url, form, {
+      headers: { ...form.getHeaders(), 'x-api-key': apiKey },
+      timeout: 30000,
+    });
 
     const data = response.data;
-
     logger.info('[Didit] Aadhaar response', {
       status: data?.status,
       matchType: data?.match_type,
-      hasSourceData: Boolean(data?.source_data),
+      validations: data?.validations?.map((v: any) => ({ outcome: v.outcome_code, service: v.service_id })),
     });
 
-    // Didit returns: { status: "Approved"|"Declined", match_type, source_data: {...} }
-    const sourceData = data?.source_data || data?.data || {};
-    const isVerified = data?.status === 'Approved' || data?.match_type === 'FULL_MATCH';
+    const isVerified = data?.status === 'Approved' ||
+      data?.validations?.some((v: any) => v.outcome_code === 'MATCH' && v.service_id === 'ind_aadhaar');
 
     if (!isVerified) {
+      const outcomeCode = data?.validations?.[0]?.outcome_code || data?.match_type || 'MISMATCH';
       throw new AppError(
-        'Aadhaar verification failed. Please check your Aadhaar number and try again.',
+        `Aadhaar verification failed (${outcomeCode}). Please check your details and try again.`,
         400
       );
     }
 
-    // Parse address — can be object or string from Didit
+    // Extract name/dob from validations[].source_data
+    const sourceData = data?.validations?.[0]?.source_data || data?.source_data || {};
+
     let address = '';
-    if (sourceData?.address) {
-      if (typeof sourceData.address === 'object') {
-        address = [
-          sourceData.address?.house,
-          sourceData.address?.street,
-          sourceData.address?.landmark,
-          sourceData.address?.loc,
-          sourceData.address?.vtc,
-          sourceData.address?.district,
-          sourceData.address?.state,
-          sourceData.address?.country,
-        ].filter(Boolean).join(', ');
-      } else {
-        address = String(sourceData.address);
-      }
-    } else {
-      address = sourceData?.full_address || '';
+    if (sourceData?.address && typeof sourceData.address === 'object') {
+      address = [
+        sourceData.address?.street_1,
+        sourceData.address?.city,
+        sourceData.address?.region,
+        sourceData.address?.postal_code,
+      ].filter(Boolean).join(', ');
+    } else if (sourceData?.address) {
+      address = String(sourceData.address);
     }
 
     return {
       verified: true,
-      fullName: String(sourceData?.name || sourceData?.full_name || ''),
-      dob: String(sourceData?.dob || sourceData?.date_of_birth || ''),
+      fullName: String(sourceData?.full_name || fullName),
+      dob: String(sourceData?.date_of_birth || dob),
       gender: String(sourceData?.gender || ''),
       address,
-      aadhaarNumber: String(sourceData?.masked_aadhaar || sourceData?.personal_number || ''),
+      aadhaarNumber: masked,
       rawResponse: data,
     };
   } catch (error: any) {
     if (error instanceof AppError) throw error;
 
-    // ── Handle Didit onboarding requirement ──────────────────────────────────
-    // India KYC services need manual activation in Didit Business Console
     const errData = error?.response?.data;
     if (errData?.requires_onboarding?.length > 0) {
-      logger.error('[Didit] India services not activated', {
-        requires_onboarding: errData.requires_onboarding,
-        message: 'Contact Didit support at https://wa.me/+19544659728 to activate ind_aadhaar',
-      });
-      throw new AppError(
-        'Aadhaar verification service is not yet activated. Please contact support.',
-        503
-      );
+      logger.error('[Didit] India Aadhaar service not activated', { requires_onboarding: errData.requires_onboarding });
+      throw new AppError('Aadhaar verification service is not yet activated. Please contact support.', 503);
     }
 
     logger.error('[Didit] Aadhaar verification failed', {
@@ -171,20 +163,20 @@ export const verifyAadhaar = async (
       data: JSON.stringify(errData),
       message: error?.message,
     });
-    const msg =
-      errData?.detail ||
-      errData?.message ||
-      (Array.isArray(errData?.services) ? errData.services[0] : null) ||
-      error?.message ||
-      'Aadhaar verification failed';
-    throw new AppError(msg, error?.response?.status || 502);
+    throw new AppError(
+      errData?.detail || errData?.message || error?.message || 'Aadhaar verification failed',
+      error?.response?.status || 502
+    );
   }
 };
-
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── PAN Verification ───────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════
+// Docs: https://docs.didit.me/api-reference/database-validation/india/pan-permanent-account-number
+// Required: issuing_state, services, consent, full_name, date_of_birth, pan
+// All fields sent as multipart/form-data — NOT JSON.
+
 export type PanVerificationResult = {
   valid: boolean;
   registeredName: string;
@@ -193,68 +185,63 @@ export type PanVerificationResult = {
 };
 
 export const verifyPanStandalone = async (
-  panNumber: string
+  panNumber: string,
+  fullName: string,
+  dob: string,      // YYYY-MM-DD
+  userId?: string
 ): Promise<PanVerificationResult> => {
-  const { baseUrl } = getDiditConfig();
+  const { baseUrl, apiKey } = getDiditConfig();
   const url = `${baseUrl}/v3/database-validation/`;
 
-  logger.info('[Didit] Verifying PAN', {
-    pan: panNumber.slice(0, 4) + '******',
-    url,
+  logger.info('[Didit] Verifying PAN', { pan: panNumber.slice(0, 4) + '******', url });
+
+  const form = makeForm({
+    issuing_state: 'IND',
+    services:      'ind_pan_permanent_account_number',
+    consent:       'true',
+    full_name:     fullName.trim(),
+    date_of_birth: normalizeDob(dob),
+    pan:           panNumber.trim().toUpperCase(),
+    ...(userId ? { vendor_data: userId } : {}),
   });
 
   try {
-    const response = await axios.post(
-      url,
-      {
-        issuing_state: 'IND',
-        services: 'ind_pan_permanent_account_number',  // Correct Didit service ID
-        personal_number: panNumber.toUpperCase().trim(),
-      },
-      { headers: getHeaders(), timeout: 30000 }
-    );
-
-    const data = response.data;
-
-    logger.info('[Didit] PAN response', {
-      status: data?.status,
-      matchType: data?.match_type,
+    const response = await axios.post(url, form, {
+      headers: { ...form.getHeaders(), 'x-api-key': apiKey },
+      timeout: 30000,
     });
 
-    const sourceData = data?.source_data || data?.data || {};
-    const isValid = data?.status === 'Approved' || data?.match_type === 'FULL_MATCH';
+    const data = response.data;
+    logger.info('[Didit] PAN response', {
+      status: data?.status,
+      validations: data?.validations?.map((v: any) => ({ outcome: v.outcome_code })),
+    });
+
+    const sourceData = data?.validations?.[0]?.source_data || data?.source_data || {};
+    const isValid = data?.status === 'Approved' ||
+      data?.validations?.some((v: any) => v.outcome_code === 'MATCH' && v.service_id === 'ind_pan_permanent_account_number');
 
     return {
       valid: isValid,
-      registeredName: String(
-        sourceData?.name ||
-        sourceData?.full_name ||
-        sourceData?.registered_name ||
-        ''
-      ),
+      registeredName: String(sourceData?.full_name || sourceData?.name || fullName),
       panType: String(sourceData?.category || sourceData?.type || ''),
       rawResponse: data,
     };
   } catch (error: any) {
     const errData = error?.response?.data;
-
     if (errData?.requires_onboarding?.length > 0) {
       logger.error('[Didit] PAN service not activated', { requires_onboarding: errData.requires_onboarding });
       throw new AppError('PAN verification service is not yet activated. Please contact support.', 503);
     }
-
     logger.error('[Didit] PAN verification failed', {
       status: error?.response?.status,
       data: JSON.stringify(errData),
       message: error?.message,
     });
-    const msg =
-      errData?.detail ||
-      errData?.message ||
-      (Array.isArray(errData?.services) ? errData.services[0] : null) ||
-      error?.message ||
-      'PAN verification failed';
-    throw new AppError(msg, error?.response?.status || 502);
+    throw new AppError(
+      errData?.detail || errData?.message || error?.message || 'PAN verification failed',
+      error?.response?.status || 502
+    );
   }
 };
 
@@ -262,6 +249,11 @@ export const verifyPanStandalone = async (
 // ══════════════════════════════════════════════════════════════════════════
 // ── Driving License Verification ───────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════
+// Docs: https://docs.didit.me/api-reference/database-validation/india/drivers-licence
+// Required: issuing_state, services, consent, full_name, date_of_birth,
+//           driver_license_number
+// All fields sent as multipart/form-data — NOT JSON.
+
 export type DlVerificationResult = {
   valid: boolean;
   name: string;
@@ -274,49 +266,46 @@ export type DlVerificationResult = {
 
 export const verifyDrivingLicenseStandalone = async (
   dlNumber: string,
-  dob: string // YYYY-MM-DD or DD-MM-YYYY — will be normalized
+  fullName: string,
+  dob: string,      // YYYY-MM-DD or DD-MM-YYYY — will be normalized
+  userId?: string
 ): Promise<DlVerificationResult> => {
-  const { baseUrl } = getDiditConfig();
+  const { baseUrl, apiKey } = getDiditConfig();
   const url = `${baseUrl}/v3/database-validation/`;
 
-  // Normalize DOB to YYYY-MM-DD
   const formattedDob = normalizeDob(dob);
-
-  // Validate date
-  const parsedDate = new Date(formattedDob);
-  if (isNaN(parsedDate.getTime())) {
+  if (isNaN(new Date(formattedDob).getTime())) {
     throw new AppError(`Invalid date of birth: ${dob}`, 400);
   }
 
-  logger.info('[Didit] Verifying DL', {
-    dl: dlNumber.slice(0, 4) + '****',
-    dob: formattedDob,
-    url,
+  logger.info('[Didit] Verifying DL', { dl: dlNumber.slice(0, 4) + '****', dob: formattedDob, url });
+
+  const form = makeForm({
+    issuing_state:          'IND',
+    services:               'ind_drivers_licence',
+    consent:                'true',
+    full_name:              fullName.trim(),
+    date_of_birth:          formattedDob,
+    driver_license_number:  dlNumber.toUpperCase().trim(),
+    ...(userId ? { vendor_data: userId } : {}),
   });
 
   try {
-    const response = await axios.post(
-      url,
-      {
-        issuing_state: 'IND',
-        services: 'ind_drivers_licence',          // Correct Didit service ID
-        personal_number: dlNumber.toUpperCase().trim(),
-        date_of_birth: formattedDob,              // Didit uses date_of_birth
-      },
-      { headers: getHeaders(), timeout: 30000 }
-    );
-
-    const data = response.data;
-
-    logger.info('[Didit] DL response', {
-      status: data?.status,
-      matchType: data?.match_type,
+    const response = await axios.post(url, form, {
+      headers: { ...form.getHeaders(), 'x-api-key': apiKey },
+      timeout: 30000,
     });
 
-    const dlData = data?.source_data || data?.data || {};
-    const isValid = data?.status === 'Approved' || data?.match_type === 'FULL_MATCH';
+    const data = response.data;
+    logger.info('[Didit] DL response', {
+      status: data?.status,
+      validations: data?.validations?.map((v: any) => ({ outcome: v.outcome_code })),
+    });
 
-    // Extract vehicle classes — can be array of strings or objects
+    const dlData = data?.validations?.[0]?.source_data || data?.source_data || {};
+    const isValid = data?.status === 'Approved' ||
+      data?.validations?.some((v: any) => v.outcome_code === 'MATCH' && v.service_id === 'ind_drivers_licence');
+
     let vehicleClass: string[] = [];
     if (dlData?.vehicle_classes && Array.isArray(dlData.vehicle_classes)) {
       vehicleClass = dlData.vehicle_classes.map((vc: any) =>
@@ -328,43 +317,32 @@ export const verifyDrivingLicenseStandalone = async (
         : [String(dlData.vehicle_class)];
     }
 
-    // Extract expiry date — may be in multiple fields
-    const expiryDate =
-      dlData?.doe ||
-      dlData?.expiry_date ||
-      dlData?.validity?.non_transport?.to ||
-      dlData?.validity?.transport?.to ||
-      '';
+    const expiryDate = dlData?.expiry_date || dlData?.doe || '';
 
     return {
       valid: isValid,
-      name: String(dlData?.name || dlData?.full_name || ''),
-      dob: String(dlData?.dob || dlData?.date_of_birth || dob),
-      issueDate: String(dlData?.doi || dlData?.issue_date || ''),
+      name: String(dlData?.full_name || fullName),
+      dob: String(dlData?.date_of_birth || dob),
+      issueDate: String(dlData?.issue_date || dlData?.doi || ''),
       expiryDate: String(expiryDate),
       vehicleClass,
       rawResponse: data,
     };
   } catch (error: any) {
     const errData = error?.response?.data;
-
     if (errData?.requires_onboarding?.length > 0) {
       logger.error('[Didit] DL service not activated', { requires_onboarding: errData.requires_onboarding });
       throw new AppError('Driving License verification service is not yet activated. Please contact support.', 503);
     }
-
     logger.error('[Didit] DL verification failed', {
       status: error?.response?.status,
       data: JSON.stringify(errData),
       message: error?.message,
     });
-    const msg =
-      errData?.detail ||
-      errData?.message ||
-      (Array.isArray(errData?.services) ? errData.services[0] : null) ||
-      error?.message ||
-      'Driving License verification failed';
-    throw new AppError(`DL verification error: ${msg}`, error?.response?.status || 502);
+    throw new AppError(
+      errData?.detail || errData?.message || error?.message || 'Driving License verification failed',
+      error?.response?.status || 502
+    );
   }
 };
 
@@ -516,16 +494,19 @@ export const faceMatch = async (
     const cleanSelfie = selfieBase64.replace(/^data:image\/\w+;base64,/, '');
     const cleanDoc = documentImageBase64.replace(/^data:image\/\w+;base64,/, '');
 
+    const { baseUrl, apiKey } = getDiditConfig();
+    const url = `${baseUrl}/v3/face-match/`;
+
     const response = await axios.post(
       url,
       {
-        source_image: cleanSelfie,    // selfie
-        target_image: cleanDoc,       // document photo (Aadhaar/DL photo)
-        rotate_image: true,           // handle portrait/landscape captures
+        source_image: cleanSelfie,
+        target_image: cleanDoc,
+        rotate_image: true,
         face_match_score_decline_threshold: threshold,
-        save_api_request: true,       // persist to Didit console for review
+        save_api_request: true,
       },
-      { headers: getHeaders(), timeout: 60000 }
+      { headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey }, timeout: 60000 }
     );
 
     const data = response.data;
@@ -574,7 +555,7 @@ export type FaceLivenessResult = {
 export const faceLivenessCheck = async (
   imageBase64: string
 ): Promise<FaceLivenessResult> => {
-  const { baseUrl } = getDiditConfig();
+  const { baseUrl, apiKey } = getDiditConfig();
   const url = `${baseUrl}/v3/passive-liveness/`;
 
   logger.info('[Didit] Running face liveness check', { url });
@@ -585,7 +566,7 @@ export const faceLivenessCheck = async (
     const response = await axios.post(
       url,
       { image: cleanImage },
-      { headers: getHeaders(), timeout: 60000 }
+      { headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey }, timeout: 60000 }
     );
 
     const data = response.data;
