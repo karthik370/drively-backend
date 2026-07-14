@@ -146,45 +146,60 @@ export const verifyAadhaar = async (
     });
 
     const data = response.data;
-    const validation = data?.validations?.[0];
-    const outcomeCode = validation?.outcome_code || data?.match_type || 'UNKNOWN';
-    const fieldValidation = validation?.validation || {};
 
-    logger.info('[Didit] Aadhaar response', {
+    // Log FULL raw response so we can see exactly what Didit returns
+    logger.info('[Didit] Aadhaar raw response', {
       status: data?.status,
       matchType: data?.match_type,
-      outcomeCode,
-      fieldValidation,  // e.g. { full_name: "no_match", date_of_birth: "full_match", identification_number: "full_match" }
+      request_id: data?.request_id,
+      validationsCount: data?.validations?.length ?? 'undefined',
+      // Full response for debugging (first call)
+      rawData: JSON.stringify(data).slice(0, 800),
     });
 
-    // MATCH = all fields matched UIDAI. PARTIAL_MATCH = Aadhaar number found but name/dob spelling differs.
-    // Both should be accepted — PARTIAL_MATCH is very common with Indian names (e.g. "Govardhan" vs "Govardhana").
-    // Only NO_MATCH (Aadhaar not found at all) should be rejected.
+    const validation  = data?.validations?.[0];
+    const outcomeCode = validation?.outcome_code
+      ?? (data?.validations?.length === 0 ? 'EMPTY_VALIDATIONS' : null)
+      ?? data?.match_type
+      ?? 'UNKNOWN';
+    const fieldValidation = validation?.validation || {};
+
+    // Didit status values:
+    //   "Approved"  → MATCH (all fields matched)
+    //   "In Review" → PARTIAL_MATCH (Aadhaar found, name/dob slightly off)
+    //   "Declined"  → NO_MATCH (Aadhaar not found)
+    // Accept both Approved and In Review
     const isVerified =
-      data?.status === 'Approved' ||
-      outcomeCode === 'MATCH' ||
-      outcomeCode === 'PARTIAL_MATCH';
+      data?.status === 'Approved'   ||   // MATCH
+      data?.status === 'In Review'  ||   // PARTIAL_MATCH
+      outcomeCode   === 'MATCH'     ||
+      outcomeCode   === 'PARTIAL_MATCH';
 
     if (!isVerified) {
-      // Build a helpful error message showing which fields failed
       const fieldDetails = Object.entries(fieldValidation)
         .filter(([_, v]) => v === 'no_match')
         .map(([k]) => k.replace(/_/g, ' '))
         .join(', ');
 
       const hint = fieldDetails
-        ? `The following fields did not match UIDAI records: ${fieldDetails}. Please check your details and try again.`
-        : `Aadhaar verification failed (${outcomeCode}). Please check your details and try again.`;
+        ? `The following details did not match UIDAI records: ${fieldDetails}. Please check and try again.`
+        : outcomeCode === 'EMPTY_VALIDATIONS'
+          ? 'Aadhaar number not found in UIDAI records. Please verify your Aadhaar number is correct.'
+          : `Aadhaar verification failed (${outcomeCode}). Please check your details and try again.`;
 
-      logger.warn('[Didit] Aadhaar NO_MATCH', { outcomeCode, fieldValidation, masked });
+      logger.warn('[Didit] Aadhaar verification failed', {
+        outcomeCode,
+        diditStatus: data?.status,
+        fieldValidation,
+        masked,
+      });
       throw new AppError(hint, 400);
     }
 
-    // Extract name/dob from validations[].source_data
+    // Extract source data (may be empty for partial/approved without detailed return)
     const sourceData = validation?.source_data || data?.source_data || {};
 
-    // Log if it was a partial match so we can see what was different
-    if (outcomeCode === 'PARTIAL_MATCH') {
+    if (outcomeCode === 'PARTIAL_MATCH' || data?.status === 'In Review') {
       logger.info('[Didit] Aadhaar PARTIAL_MATCH accepted', {
         fieldValidation,
         sourceName: sourceData?.full_name,
@@ -217,6 +232,7 @@ export const verifyAadhaar = async (
     return handleDiditError(error, 'ind_aadhaar') as never;
   }
 };
+
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── PAN Verification ───────────────────────────────────────────────────────
