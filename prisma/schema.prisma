@@ -1267,6 +1267,7 @@ model KycVerification {
 
   // Metadata
   cashfreeResponse          Json?
+  diditSessionId            String?           @db.VarChar(255) // Didit hosted session ID
   failureReason             String?           @db.Text
   completedAt               DateTime?
   createdAt                 DateTime          @default(now())
