@@ -19,9 +19,23 @@ import { AppError } from '../middleware/errorHandler';
 
 const getDiditConfig = () => {
   const apiKey = process.env.DIDIT_API_KEY;
-  const workflowId = process.env.DIDIT_WORKFLOW_ID;
+  let workflowId = process.env.DIDIT_WORKFLOW_ID;
   if (!apiKey)      throw new AppError('DIDIT_API_KEY not configured', 500);
   if (!workflowId)  throw new AppError('DIDIT_WORKFLOW_ID not configured', 500);
+
+  // Defensive: if someone pastes the full browser URL
+  // e.g. "https://verify.didit.me/u/ICCykQKNRBOOkY3e055nSg"
+  // extract just the last path segment as the ID
+  if (workflowId.startsWith('http')) {
+    try {
+      const parsed = new URL(workflowId);
+      workflowId = parsed.pathname.split('/').filter(Boolean).pop() ?? workflowId;
+      logger.warn('[Didit Session] DIDIT_WORKFLOW_ID looks like a URL — extracted ID segment', { workflowId });
+    } catch {
+      // leave as-is
+    }
+  }
+
   return { apiKey, workflowId, baseUrl: 'https://verification.didit.me' };
 };
 
@@ -64,27 +78,46 @@ export const createDiditSession = async (
 
   logger.info('[Didit Session] Creating verification session', { userId, workflowId, callback });
 
-  const response = await axios.post(
-    `${baseUrl}/v3/session/`,
-    {
-      workflow_id:      workflowId,
-      vendor_data:      `user-${userId}`,       // binds session to your user
-      callback,
-      callback_method:  'both',                  // fires on both initiator + completer device
-      language:         'hi',                    // Hindi for Indian drivers
-      expected_details: {
-        id_country:             'IND',
-        expected_document_types: ['ID', 'DL'], // ID=Aadhaar, DL=Driving License
+  let response: any;
+  try {
+    response = await axios.post(
+      `${baseUrl}/v3/session/`,
+      {
+        workflow_id:      workflowId,
+        vendor_data:      `user-${userId}`,
+        callback,
+        callback_method:  'both',
+        language:         'hi',
+        expected_details: {
+          id_country:              'IND',
+          expected_document_types: ['ID', 'DL'],
+        },
       },
-    },
-    {
-      headers: {
-        'x-api-key':    apiKey,
-        'Content-Type': 'application/json',
-      },
-      timeout: 15000,
-    }
-  );
+      {
+        headers: {
+          'x-api-key':    apiKey,
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+  } catch (err: any) {
+    // Log the full Didit error response so we can debug 4xx issues
+    const diditError = err?.response?.data;
+    logger.error('[Didit Session] Didit API returned an error', {
+      status:   err?.response?.status,
+      error:    diditError,
+      workflow: workflowId,
+      userId,
+    });
+    throw new AppError(
+      diditError?.message ||
+      diditError?.detail ||
+      diditError?.error ||
+      `Didit API error: ${err?.response?.status ?? err?.message}`,
+      err?.response?.status ?? 500
+    );
+  }
 
   const { session_id, url, status } = response.data;
 
