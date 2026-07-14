@@ -146,34 +146,30 @@ export const verifyAadhaar = async (
     });
 
     const data = response.data;
+    // Didit wraps KYC result under data.database_validation, not at the top level
+    const db = data?.database_validation ?? data;
 
-    // Log FULL raw response so we can see exactly what Didit returns
-    logger.info('[Didit] Aadhaar raw response', {
-      status: data?.status,
-      matchType: data?.match_type,
-      request_id: data?.request_id,
-      validationsCount: data?.validations?.length ?? 'undefined',
-      // Full response for debugging (first call)
-      rawData: JSON.stringify(data).slice(0, 800),
-    });
-
-    const validation  = data?.validations?.[0];
-    const outcomeCode = validation?.outcome_code
-      ?? (data?.validations?.length === 0 ? 'EMPTY_VALIDATIONS' : null)
-      ?? data?.match_type
+    const validation     = db?.validations?.[0];
+    const outcomeCode    = validation?.outcome_code
+      ?? (db?.validations?.length === 0 ? 'EMPTY_VALIDATIONS' : null)
+      ?? db?.match_type
       ?? 'UNKNOWN';
     const fieldValidation = validation?.validation || {};
 
-    // Didit status values:
-    //   "Approved"  → MATCH (all fields matched)
-    //   "In Review" → PARTIAL_MATCH (Aadhaar found, name/dob slightly off)
-    //   "Declined"  → NO_MATCH (Aadhaar not found)
-    // Accept both Approved and In Review
+    logger.info('[Didit] Aadhaar response', {
+      request_id:  data?.request_id,
+      dbStatus:    db?.status,
+      matchType:   db?.match_type,
+      outcomeCode,
+      fieldValidation,
+    });
+
+    // Accepted: MATCH (Approved) or PARTIAL_MATCH (In Review = Aadhaar found, minor name/dob diff)
     const isVerified =
-      data?.status === 'Approved'   ||   // MATCH
-      data?.status === 'In Review'  ||   // PARTIAL_MATCH
-      outcomeCode   === 'MATCH'     ||
-      outcomeCode   === 'PARTIAL_MATCH';
+      db?.status === 'Approved'   ||
+      db?.status === 'In Review'  ||
+      outcomeCode === 'MATCH'     ||
+      outcomeCode === 'PARTIAL_MATCH';
 
     if (!isVerified) {
       const fieldDetails = Object.entries(fieldValidation)
@@ -187,24 +183,14 @@ export const verifyAadhaar = async (
           ? 'Aadhaar number not found in UIDAI records. Please verify your Aadhaar number is correct.'
           : `Aadhaar verification failed (${outcomeCode}). Please check your details and try again.`;
 
-      logger.warn('[Didit] Aadhaar verification failed', {
-        outcomeCode,
-        diditStatus: data?.status,
-        fieldValidation,
-        masked,
-      });
+      logger.warn('[Didit] Aadhaar verification failed', { outcomeCode, dbStatus: db?.status, fieldValidation, masked });
       throw new AppError(hint, 400);
     }
 
-    // Extract source data (may be empty for partial/approved without detailed return)
-    const sourceData = validation?.source_data || data?.source_data || {};
+    const sourceData = validation?.source_data || db?.source_data || {};
 
-    if (outcomeCode === 'PARTIAL_MATCH' || data?.status === 'In Review') {
-      logger.info('[Didit] Aadhaar PARTIAL_MATCH accepted', {
-        fieldValidation,
-        sourceName: sourceData?.full_name,
-        inputName: fullName,
-      });
+    if (outcomeCode === 'PARTIAL_MATCH' || db?.status === 'In Review') {
+      logger.info('[Didit] Aadhaar PARTIAL_MATCH accepted', { fieldValidation, sourceName: sourceData?.full_name, inputName: fullName });
     }
 
     let address = '';
@@ -276,16 +262,14 @@ export const verifyPanStandalone = async (
     });
 
     const data = response.data;
-    logger.info('[Didit] PAN response', {
-      status: data?.status,
-      validations: data?.validations?.map((v: any) => ({ outcome: v.outcome_code })),
-    });
+    const db = data?.database_validation ?? data;
+    const panValidation = db?.validations?.[0];
+    const outcomeCode   = panValidation?.outcome_code || db?.match_type || 'UNKNOWN';
+    const sourceData    = panValidation?.source_data || db?.source_data || {};
+    const isValid = db?.status === 'Approved' || db?.status === 'In Review' ||
+      outcomeCode === 'MATCH' || outcomeCode === 'PARTIAL_MATCH';
 
-    const sourceData = data?.validations?.[0]?.source_data || data?.source_data || {};
-    const outcomeCode = data?.validations?.[0]?.outcome_code || data?.match_type || 'UNKNOWN';
-    const isValid = data?.status === 'Approved' ||
-      outcomeCode === 'MATCH' ||
-      outcomeCode === 'PARTIAL_MATCH';
+    logger.info('[Didit] PAN response', { dbStatus: db?.status, matchType: db?.match_type, outcomeCode });
 
     return {
       valid: isValid,
@@ -350,16 +334,14 @@ export const verifyDrivingLicenseStandalone = async (
     });
 
     const data = response.data;
-    logger.info('[Didit] DL response', {
-      status: data?.status,
-      validations: data?.validations?.map((v: any) => ({ outcome: v.outcome_code })),
-    });
+    const db = data?.database_validation ?? data;
+    const dlValidation = db?.validations?.[0];
+    const outcomeCode  = dlValidation?.outcome_code || db?.match_type || 'UNKNOWN';
+    const dlData       = dlValidation?.source_data || db?.source_data || {};
+    const isValid = db?.status === 'Approved' || db?.status === 'In Review' ||
+      outcomeCode === 'MATCH' || outcomeCode === 'PARTIAL_MATCH';
 
-    const dlData = data?.validations?.[0]?.source_data || data?.source_data || {};
-    const outcomeCode = data?.validations?.[0]?.outcome_code || data?.match_type || 'UNKNOWN';
-    const isValid = data?.status === 'Approved' ||
-      outcomeCode === 'MATCH' ||
-      outcomeCode === 'PARTIAL_MATCH';
+    logger.info('[Didit] DL response', { dbStatus: db?.status, matchType: db?.match_type, outcomeCode });
 
     let vehicleClass: string[] = [];
     if (dlData?.vehicle_classes && Array.isArray(dlData.vehicle_classes)) {
