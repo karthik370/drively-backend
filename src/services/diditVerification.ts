@@ -146,25 +146,51 @@ export const verifyAadhaar = async (
     });
 
     const data = response.data;
+    const validation = data?.validations?.[0];
+    const outcomeCode = validation?.outcome_code || data?.match_type || 'UNKNOWN';
+    const fieldValidation = validation?.validation || {};
+
     logger.info('[Didit] Aadhaar response', {
       status: data?.status,
       matchType: data?.match_type,
-      validations: data?.validations?.map((v: any) => ({ outcome: v.outcome_code, service: v.service_id })),
+      outcomeCode,
+      fieldValidation,  // e.g. { full_name: "no_match", date_of_birth: "full_match", identification_number: "full_match" }
     });
 
-    const isVerified = data?.status === 'Approved' ||
-      data?.validations?.some((v: any) => v.outcome_code === 'MATCH' && v.service_id === 'ind_aadhaar');
+    // MATCH = all fields matched UIDAI. PARTIAL_MATCH = Aadhaar number found but name/dob spelling differs.
+    // Both should be accepted — PARTIAL_MATCH is very common with Indian names (e.g. "Govardhan" vs "Govardhana").
+    // Only NO_MATCH (Aadhaar not found at all) should be rejected.
+    const isVerified =
+      data?.status === 'Approved' ||
+      outcomeCode === 'MATCH' ||
+      outcomeCode === 'PARTIAL_MATCH';
 
     if (!isVerified) {
-      const outcomeCode = data?.validations?.[0]?.outcome_code || data?.match_type || 'MISMATCH';
-      throw new AppError(
-        `Aadhaar verification failed (${outcomeCode}). Please check your details and try again.`,
-        400
-      );
+      // Build a helpful error message showing which fields failed
+      const fieldDetails = Object.entries(fieldValidation)
+        .filter(([_, v]) => v === 'no_match')
+        .map(([k]) => k.replace(/_/g, ' '))
+        .join(', ');
+
+      const hint = fieldDetails
+        ? `The following fields did not match UIDAI records: ${fieldDetails}. Please check your details and try again.`
+        : `Aadhaar verification failed (${outcomeCode}). Please check your details and try again.`;
+
+      logger.warn('[Didit] Aadhaar NO_MATCH', { outcomeCode, fieldValidation, masked });
+      throw new AppError(hint, 400);
     }
 
     // Extract name/dob from validations[].source_data
-    const sourceData = data?.validations?.[0]?.source_data || data?.source_data || {};
+    const sourceData = validation?.source_data || data?.source_data || {};
+
+    // Log if it was a partial match so we can see what was different
+    if (outcomeCode === 'PARTIAL_MATCH') {
+      logger.info('[Didit] Aadhaar PARTIAL_MATCH accepted', {
+        fieldValidation,
+        sourceName: sourceData?.full_name,
+        inputName: fullName,
+      });
+    }
 
     let address = '';
     if (sourceData?.address && typeof sourceData.address === 'object') {
@@ -240,8 +266,10 @@ export const verifyPanStandalone = async (
     });
 
     const sourceData = data?.validations?.[0]?.source_data || data?.source_data || {};
+    const outcomeCode = data?.validations?.[0]?.outcome_code || data?.match_type || 'UNKNOWN';
     const isValid = data?.status === 'Approved' ||
-      data?.validations?.some((v: any) => v.outcome_code === 'MATCH' && v.service_id === 'ind_pan_permanent_account_number');
+      outcomeCode === 'MATCH' ||
+      outcomeCode === 'PARTIAL_MATCH';
 
     return {
       valid: isValid,
@@ -312,8 +340,10 @@ export const verifyDrivingLicenseStandalone = async (
     });
 
     const dlData = data?.validations?.[0]?.source_data || data?.source_data || {};
+    const outcomeCode = data?.validations?.[0]?.outcome_code || data?.match_type || 'UNKNOWN';
     const isValid = data?.status === 'Approved' ||
-      data?.validations?.some((v: any) => v.outcome_code === 'MATCH' && v.service_id === 'ind_drivers_licence');
+      outcomeCode === 'MATCH' ||
+      outcomeCode === 'PARTIAL_MATCH';
 
     let vehicleClass: string[] = [];
     if (dlData?.vehicle_classes && Array.isArray(dlData.vehicle_classes)) {
