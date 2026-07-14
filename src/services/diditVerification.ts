@@ -45,6 +45,44 @@ const makeForm = (fields: Record<string, string>): FormData => {
   return form;
 };
 
+// ── Helper: Consistent Didit error handler ──────────────────────────────────
+// Translates Didit API errors into friendly AppErrors for the client.
+const handleDiditError = (error: any, service: string): never => {
+  if (error instanceof AppError) throw error;
+
+  const status  = error?.response?.status;
+  const errData = error?.response?.data;
+
+  // 403 = no credits in Didit wallet
+  if (status === 403 || (typeof errData === 'string' && errData.includes('credits'))) {
+    logger.error(`[Didit] No credits for ${service} — top up at https://business.didit.me`, { status });
+    throw new AppError(
+      'Verification service is temporarily unavailable. Please try again later.',
+      503,
+    );
+  }
+
+  // 400 + requires_onboarding = service not activated
+  if (errData?.requires_onboarding?.length > 0) {
+    logger.error(`[Didit] ${service} not activated`, { requires_onboarding: errData.requires_onboarding });
+    throw new AppError(
+      'Verification service is not yet activated. Please contact support.',
+      503,
+    );
+  }
+
+  // All other errors
+  logger.error(`[Didit] ${service} failed`, {
+    status,
+    data: JSON.stringify(errData).slice(0, 300),
+    message: error?.message,
+  });
+  throw new AppError(
+    errData?.detail || errData?.message || errData?.error || error?.message || `${service} verification failed`,
+    status || 502,
+  );
+};
+
 // ── Helper: DOB normalizer ──────────────────────────────────────────────────
 // Converts various DOB formats to YYYY-MM-DD (what Didit expects)
 const normalizeDob = (dob: string): string => {
@@ -150,23 +188,7 @@ export const verifyAadhaar = async (
       rawResponse: data,
     };
   } catch (error: any) {
-    if (error instanceof AppError) throw error;
-
-    const errData = error?.response?.data;
-    if (errData?.requires_onboarding?.length > 0) {
-      logger.error('[Didit] India Aadhaar service not activated', { requires_onboarding: errData.requires_onboarding });
-      throw new AppError('Aadhaar verification service is not yet activated. Please contact support.', 503);
-    }
-
-    logger.error('[Didit] Aadhaar verification failed', {
-      status: error?.response?.status,
-      data: JSON.stringify(errData),
-      message: error?.message,
-    });
-    throw new AppError(
-      errData?.detail || errData?.message || error?.message || 'Aadhaar verification failed',
-      error?.response?.status || 502
-    );
+    return handleDiditError(error, 'ind_aadhaar') as never;
   }
 };
 
@@ -228,20 +250,7 @@ export const verifyPanStandalone = async (
       rawResponse: data,
     };
   } catch (error: any) {
-    const errData = error?.response?.data;
-    if (errData?.requires_onboarding?.length > 0) {
-      logger.error('[Didit] PAN service not activated', { requires_onboarding: errData.requires_onboarding });
-      throw new AppError('PAN verification service is not yet activated. Please contact support.', 503);
-    }
-    logger.error('[Didit] PAN verification failed', {
-      status: error?.response?.status,
-      data: JSON.stringify(errData),
-      message: error?.message,
-    });
-    throw new AppError(
-      errData?.detail || errData?.message || error?.message || 'PAN verification failed',
-      error?.response?.status || 502
-    );
+    return handleDiditError(error, 'ind_pan_permanent_account_number') as never;
   }
 };
 
@@ -329,20 +338,7 @@ export const verifyDrivingLicenseStandalone = async (
       rawResponse: data,
     };
   } catch (error: any) {
-    const errData = error?.response?.data;
-    if (errData?.requires_onboarding?.length > 0) {
-      logger.error('[Didit] DL service not activated', { requires_onboarding: errData.requires_onboarding });
-      throw new AppError('Driving License verification service is not yet activated. Please contact support.', 503);
-    }
-    logger.error('[Didit] DL verification failed', {
-      status: error?.response?.status,
-      data: JSON.stringify(errData),
-      message: error?.message,
-    });
-    throw new AppError(
-      errData?.detail || errData?.message || error?.message || 'Driving License verification failed',
-      error?.response?.status || 502
-    );
+    return handleDiditError(error, 'ind_drivers_licence') as never;
   }
 };
 
