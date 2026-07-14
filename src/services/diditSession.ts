@@ -11,6 +11,7 @@
  */
 import axios from 'axios';
 import crypto from 'crypto';
+import { KycStatus, VerificationStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { logger } from '../utils/logger';
 import { AppError } from '../middleware/errorHandler';
@@ -20,8 +21,8 @@ import { AppError } from '../middleware/errorHandler';
 const getDiditConfig = () => {
   const apiKey = process.env.DIDIT_API_KEY;
   let workflowId = process.env.DIDIT_WORKFLOW_ID;
-  if (!apiKey)      throw new AppError('DIDIT_API_KEY not configured', 500);
-  if (!workflowId)  throw new AppError('DIDIT_WORKFLOW_ID not configured', 500);
+  if (!apiKey)     throw new AppError('DIDIT_API_KEY not configured', 500);
+  if (!workflowId) throw new AppError('DIDIT_WORKFLOW_ID not configured', 500);
 
   // Defensive: if someone pastes the full browser URL
   // e.g. "https://verify.didit.me/u/ICCykQKNRBOOkY3e055nSg"
@@ -74,7 +75,7 @@ export const createDiditSession = async (
 
   // Use the app's deep-link scheme for mobile callback
   // Didit appends: ?verificationSessionId=xxx&status=Approved
-  const callback = callbackUrl || `drivegaadi://kyc-callback`;
+  const callback = callbackUrl || 'drivegaadi://kyc-callback';
 
   logger.info('[Didit Session] Creating verification session', { userId, workflowId, callback });
 
@@ -112,8 +113,8 @@ export const createDiditSession = async (
     });
     throw new AppError(
       diditError?.message ||
-      diditError?.detail ||
-      diditError?.error ||
+      diditError?.detail  ||
+      diditError?.error   ||
       `Didit API error: ${err?.response?.status ?? err?.message}`,
       err?.response?.status ?? 500
     );
@@ -238,13 +239,12 @@ export const handleDiditWebhookEvent = async (payload: WebhookPayload): Promise<
   if (status === 'Approved') {
     logger.info('[Didit Webhook] Session Approved — marking KYC complete', { userId });
 
-    // Extract data from decision for record-keeping
-    const faceMatch      = decision?.face_matches?.[0];
+    const faceMatch = decision?.face_matches?.[0];
 
     await prisma.kycVerification.upsert({
       where:  { userId },
       update: {
-        status:          'COMPLETED',
+        status:          KycStatus.COMPLETED,
         aadhaarVerified: true,
         panVerified:     true,
         dlVerified:      true,
@@ -256,7 +256,7 @@ export const handleDiditWebhookEvent = async (payload: WebhookPayload): Promise<
       },
       create: {
         userId,
-        status:          'COMPLETED',
+        status:          KycStatus.COMPLETED,
         aadhaarVerified: true,
         panVerified:     true,
         dlVerified:      true,
@@ -268,10 +268,13 @@ export const handleDiditWebhookEvent = async (payload: WebhookPayload): Promise<
       },
     });
 
-    // Also mark driver profile as documents verified
+    // Mark driver profile as documents verified
     await prisma.driverProfile.updateMany({
-      where:  { userId },
-      data:   { documentsVerified: true, backgroundCheckStatus: 'VERIFIED' },
+      where: { userId },
+      data:  {
+        documentsVerified:     true,
+        backgroundCheckStatus: VerificationStatus.VERIFIED,
+      },
     });
 
     logger.info('[Didit Webhook] KYC marked COMPLETED', { userId });
@@ -286,14 +289,14 @@ export const handleDiditWebhookEvent = async (payload: WebhookPayload): Promise<
     await prisma.kycVerification.upsert({
       where:  { userId },
       update: {
-        status:        'FAILED',
-        failureReason: reason,
+        status:         KycStatus.FAILED,
+        failureReason:  reason,
         diditSessionId: session_id,
       },
       create: {
         userId,
-        status:        'FAILED',
-        failureReason: reason,
+        status:         KycStatus.FAILED,
+        failureReason:  reason,
         diditSessionId: session_id,
       },
     });
