@@ -244,6 +244,8 @@ enum KycStatus {
   DIGILOCKER_COMPLETED
   FALLBACK_PENDING
   FACE_MATCH_PENDING
+  IN_PROGRESS
+  REVIEW_PENDING
   COMPLETED
   FAILED
 }
@@ -1268,6 +1270,7 @@ model KycVerification {
   // Metadata
   cashfreeResponse          Json?
   diditSessionId            String?           @db.VarChar(255) // Didit hosted session ID
+  diditSessionUrl           String?           @db.Text         // Didit verification URL (for session resume)
   failureReason             String?           @db.Text
   completedAt               DateTime?
   createdAt                 DateTime          @default(now())

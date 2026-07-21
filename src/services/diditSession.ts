@@ -122,11 +122,20 @@ export const createDiditSession = async (
 
   logger.info('[Didit Session] Session created', { userId, session_id, status, url });
 
-  // Store session_id in DB for cross-reference on webhook arrival
+  // Store session_id + URL in DB for cross-reference on webhook and session resume
   await prisma.kycVerification.upsert({
     where:  { userId },
-    update: { diditSessionId: session_id },
-    create: { userId, diditSessionId: session_id },
+    update: {
+      diditSessionId:  session_id,
+      diditSessionUrl: url,
+      status:          KycStatus.IN_PROGRESS,
+    },
+    create: {
+      userId,
+      diditSessionId:  session_id,
+      diditSessionUrl: url,
+      status:          KycStatus.IN_PROGRESS,
+    },
   }).catch((dbErr) => {
     // Non-fatal — webhook still works via vendor_data
     logger.warn('[Didit Session] Could not store session_id in DB', { userId, err: dbErr?.message });
@@ -190,7 +199,17 @@ export const confirmDiditSession = async (
     return { sessionId, status, kycCompleted: false };
   }
 
-  // In Progress, Not Started, In Review, Expired, Abandoned — don't update DB yet
+  if (status === 'In Review') {
+    await markKycInReview(userId, sessionId);
+    return { sessionId, status, kycCompleted: false };
+  }
+
+  if (status === 'In Progress' || status === 'Not Started') {
+    await markKycInProgress(userId, sessionId);
+    return { sessionId, status, kycCompleted: false };
+  }
+
+  // Expired, Abandoned, etc.
   return { sessionId, status, kycCompleted: false };
 };
 
@@ -274,6 +293,47 @@ async function markKycFailed(userId: string, sessionId: string, decision: any) {
   logger.info('[Didit] KYC marked FAILED', { userId, sessionId, reason });
 }
 
+async function markKycInReview(userId: string, sessionId: string) {
+  await prisma.kycVerification.upsert({
+    where:  { userId },
+    update: {
+      status:         KycStatus.REVIEW_PENDING,
+      diditSessionId: sessionId,
+      failureReason:  null,
+    },
+    create: {
+      userId,
+      status:         KycStatus.REVIEW_PENDING,
+      diditSessionId: sessionId,
+    },
+  });
+
+  logger.info('[Didit] KYC marked REVIEW_PENDING', { userId, sessionId });
+}
+
+async function markKycInProgress(userId: string, sessionId: string) {
+  // Only update if not already in a terminal state
+  const existing = await prisma.kycVerification.findUnique({ where: { userId } });
+  if (existing && ['COMPLETED', 'REVIEW_PENDING'].includes(existing.status)) {
+    return; // Don't downgrade from a higher state
+  }
+
+  await prisma.kycVerification.upsert({
+    where:  { userId },
+    update: {
+      status:         KycStatus.IN_PROGRESS,
+      diditSessionId: sessionId,
+    },
+    create: {
+      userId,
+      status:         KycStatus.IN_PROGRESS,
+      diditSessionId: sessionId,
+    },
+  });
+
+  logger.info('[Didit] KYC marked IN_PROGRESS', { userId, sessionId });
+}
+
 // ── Webhook Signature Verification ──────────────────────────────────────────
 
 export const verifyWebhookSignature = (
@@ -346,7 +406,7 @@ export const handleDiditWebhookEvent = async (payload: WebhookPayload): Promise<
   } else if (status === 'Declined') {
     await markKycFailed(userId, session_id, decision);
   } else if (status === 'In Review') {
-    logger.info('[Didit Webhook] Session In Review — manual review pending', { userId });
+    await markKycInReview(userId, session_id);
   } else {
     logger.info('[Didit Webhook] Unhandled status', { status, userId });
   }

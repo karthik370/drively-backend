@@ -522,6 +522,8 @@ export const getKycStatus = async (userId: string) => {
       failureReason: null as string | null,
       digilockerUrl: null as string | null,
       digilockerUrlExpiresAt: null as string | null,
+      diditSessionId: null as string | null,
+      diditSessionUrl: null as string | null,
     };
   }
 
@@ -537,6 +539,8 @@ export const getKycStatus = async (userId: string) => {
     digilockerUrlExpiresAt: null,
     aadhaarDob: kyc.aadhaarDob ? kyc.aadhaarDob.toISOString().split('T')[0] : null,
     aadhaarName: kyc.aadhaarName || null,
+    diditSessionId: kyc.diditSessionId || null,
+    diditSessionUrl: kyc.diditSessionUrl || null,
   };
 };
 
