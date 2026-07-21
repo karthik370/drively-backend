@@ -54,7 +54,13 @@ export class DiditSessionController {
     const { sessionId } = req.params;
     if (!sessionId) throw new AppError('sessionId is required', 400);
 
-    const result = await confirmDiditSession(sessionId, req.user.id);
+    // Mobile sends back the verificationUrl so we can backfill DB if it was null
+    // (sessions created before the diditSessionUrl column existed)
+    const verificationUrl = typeof req.body?.verificationUrl === 'string'
+      ? req.body.verificationUrl
+      : undefined;
+
+    const result = await confirmDiditSession(sessionId, req.user.id, verificationUrl);
 
     res.status(200).json({
       success: true,

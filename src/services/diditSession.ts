@@ -197,9 +197,19 @@ export const createDiditSession = async (
  */
 export const confirmDiditSession = async (
   sessionId: string,
-  userId: string
+  userId: string,
+  verificationUrl?: string   // optional — mobile sends it back so we can backfill if DB has null
 ): Promise<ConfirmSessionResult> => {
   const { apiKey, baseUrl } = getDiditConfig();
+
+  // Backfill diditSessionUrl in DB if it's null (sessions created before the column existed)
+  if (verificationUrl) {
+    const normalizedUrl = normalizeDiditUrl(verificationUrl);
+    await prisma.kycVerification.updateMany({
+      where: { userId, diditSessionUrl: null },
+      data:  { diditSessionUrl: normalizedUrl },
+    }).catch(() => {}); // non-fatal
+  }
 
   logger.info('[Didit Confirm] Fetching decision', { sessionId, userId });
 
