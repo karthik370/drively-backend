@@ -289,7 +289,7 @@ async function markKycCompleted(userId: string, sessionId: string, decision: any
       panVerified:     true,
       dlVerified:      true,
       faceMatchPassed: true,
-      faceMatchScore:  faceMatch?.similarity_score ?? null,
+      faceMatchScore:  faceMatch?.score ?? null,
       diditSessionId:  sessionId,
       completedAt:     new Date(),
       failureReason:   null,
@@ -301,7 +301,7 @@ async function markKycCompleted(userId: string, sessionId: string, decision: any
       panVerified:     true,
       dlVerified:      true,
       faceMatchPassed: true,
-      faceMatchScore:  faceMatch?.similarity_score ?? null,
+      faceMatchScore:  faceMatch?.score ?? null,
       diditSessionId:  sessionId,
       completedAt:     new Date(),
       failureReason:   null,
@@ -319,13 +319,32 @@ async function markKycCompleted(userId: string, sessionId: string, decision: any
   logger.info('[Didit] KYC marked COMPLETED', { userId, sessionId });
 
   // ── Auto-upload selfie from Didit face_match to Cloudinary ──────────────
-  // Didit returns a short-lived presigned URL in face_matches[0].user_image_url
-  // We download it immediately and store permanently in Cloudinary as profileImage
-  const selfieUrl: string | undefined = faceMatch?.user_image_url;
+  // Real Didit field names (confirmed from webhook logs):
+  // source_image may be a plain URL string OR an object like { url: '...' }
+  // Handle both cases safely
+  const rawSourceImage = faceMatch?.source_image;
+  const selfieUrl: string | undefined =
+    typeof rawSourceImage === 'string' ? rawSourceImage :
+    typeof rawSourceImage?.url === 'string' ? rawSourceImage.url :
+    typeof rawSourceImage?.href === 'string' ? rawSourceImage.href :
+    undefined;
+
+  logger.info('[Didit] face_match data', {
+    userId,
+    score:           faceMatch?.score,
+    status:          faceMatch?.status,
+    source_image_type: typeof rawSourceImage,
+    source_image_val:  typeof rawSourceImage === 'string'
+                         ? rawSourceImage.slice(0, 80)
+                         : JSON.stringify(rawSourceImage)?.slice(0, 120),
+    hasTargetImg:    !!faceMatch?.target_image,
+    warnings:        faceMatch?.warnings,
+  });
+
 
   if (selfieUrl) {
     try {
-      logger.info('[Didit] Auto-uploading Didit liveness selfie to Cloudinary', { userId, selfieUrl: selfieUrl.slice(0, 60) + '...' });
+      logger.info('[Didit] Auto-uploading liveness selfie to Cloudinary', { userId, selfieUrl: selfieUrl.slice(0, 80) + '...' });
 
       const uploadResult = await cloudinary.uploader.upload(selfieUrl, {
         folder:        `drivemate/${userId}/kyc-selfie`,
@@ -344,11 +363,13 @@ async function markKycCompleted(userId: string, sessionId: string, decision: any
 
       logger.info('[Didit] user.profileImage updated from Didit liveness selfie', { userId });
     } catch (err: any) {
-      // Non-fatal — KYC is still marked complete, driver just won't have a profile photo yet
       logger.error('[Didit] Failed to auto-upload selfie from Didit', { userId, error: err?.message });
     }
   } else {
-    logger.warn('[Didit] No user_image_url in face_matches — profile photo not auto-set', { userId, faceMatchKeys: Object.keys(faceMatch || {}) });
+    logger.warn('[Didit] source_image not in face_matches — profile photo not auto-set', {
+      userId,
+      faceMatchKeys: Object.keys(faceMatch || {}),
+    });
   }
 }
 
