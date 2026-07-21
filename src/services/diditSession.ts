@@ -130,24 +130,34 @@ export const createDiditSession = async (
 
   logger.info('[Didit Session] Session created', { userId, session_id, status, url });
 
-  // Store session_id + URL in DB for cross-reference on webhook and session resume
-  await prisma.kycVerification.upsert({
-    where:  { userId },
-    update: {
-      diditSessionId:  session_id,
-      diditSessionUrl: url,
-      status:          KycStatus.IN_PROGRESS,
-    },
-    create: {
-      userId,
-      diditSessionId:  session_id,
-      diditSessionUrl: url,
-      status:          KycStatus.IN_PROGRESS,
-    },
-  }).catch((dbErr) => {
+  // Store session_id + URL in DB for cross-reference on webhook and session resume.
+  // IMPORTANT: do NOT downgrade status if user is already REVIEW_PENDING or COMPLETED
+  // (Didit returns the same session idempotently — status from Didit is 'Not Started'
+  // even if user finished all steps and it's under review)
+  try {
+    const existing = await prisma.kycVerification.findUnique({ where: { userId } });
+    const keepStatus = existing?.status === KycStatus.REVIEW_PENDING
+                    || existing?.status === KycStatus.COMPLETED;
+
+    await prisma.kycVerification.upsert({
+      where:  { userId },
+      update: {
+        diditSessionId:  session_id,
+        diditSessionUrl: url,
+        // Only set IN_PROGRESS if not already in a more advanced state
+        ...(keepStatus ? {} : { status: KycStatus.IN_PROGRESS }),
+      },
+      create: {
+        userId,
+        diditSessionId:  session_id,
+        diditSessionUrl: url,
+        status:          KycStatus.IN_PROGRESS,
+      },
+    });
+  } catch (dbErr: any) {
     // Non-fatal — webhook still works via vendor_data
     logger.warn('[Didit Session] Could not store session_id in DB', { userId, err: dbErr?.message });
-  });
+  }
 
   return {
     sessionId:       session_id,
