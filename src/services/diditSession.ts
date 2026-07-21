@@ -7,7 +7,7 @@
  * Your app just opens the URL and waits for the deep-link callback.
  *
  * API: POST https://verification.didit.me/v3/session/
- * Docs: https://docs.didit.me/sessions-api/create-session
+ * Docs: https://docs.didit.me
  */
 import axios from 'axios';
 import crypto from 'crypto';
@@ -20,21 +20,18 @@ import { AppError } from '../middleware/errorHandler';
 
 const getDiditConfig = () => {
   const apiKey = process.env.DIDIT_API_KEY;
-  let workflowId = process.env.DIDIT_WORKFLOW_ID;
-  if (!apiKey)     throw new AppError('DIDIT_API_KEY not configured', 500);
-  if (!workflowId) throw new AppError('DIDIT_WORKFLOW_ID not configured', 500);
+  const workflowId = process.env.DIDIT_WORKFLOW_ID;
+  if (!apiKey)      throw new AppError('DIDIT_API_KEY not configured', 500);
+  if (!workflowId)  throw new AppError('DIDIT_WORKFLOW_ID not configured', 500);
 
-  // Defensive: if someone pastes the full browser URL
-  // e.g. "https://verify.didit.me/u/ICCykQKNRBOOkY3e055nSg"
-  // extract just the last path segment as the ID
-  if (workflowId.startsWith('http')) {
-    try {
-      const parsed = new URL(workflowId);
-      workflowId = parsed.pathname.split('/').filter(Boolean).pop() ?? workflowId;
-      logger.warn('[Didit Session] DIDIT_WORKFLOW_ID looks like a URL — extracted ID segment', { workflowId });
-    } catch {
-      // leave as-is
-    }
+  // Validate UUID format — reject anything else with a clear error
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRe.test(workflowId)) {
+    throw new AppError(
+      `DIDIT_WORKFLOW_ID must be a valid UUID (got "${workflowId.substring(0, 30)}…"). ` +
+      'Copy the Workflow ID from business.didit.me → Workflows → your workflow.',
+      500
+    );
   }
 
   return { apiKey, workflowId, baseUrl: 'https://verification.didit.me' };
@@ -48,6 +45,12 @@ export type CreateSessionResult = {
   sessionId: string;
   verificationUrl: string;
   status: string;
+};
+
+export type ConfirmSessionResult = {
+  sessionId: string;
+  status: string;           // Approved | Declined | In Review | In Progress | Not Started ...
+  kycCompleted: boolean;    // true only when status === 'Approved' and DB was updated
 };
 
 export type WebhookPayload = {
@@ -64,8 +67,8 @@ export type WebhookPayload = {
 
 /**
  * Create a Didit Hosted Verification Session for a driver.
- * Uses idempotency: if an unfinished session already exists for this
- * userId+workflow, Didit returns the same session (no duplicate charges).
+ * If an unfinished session already exists for this userId, Didit returns the
+ * same session (idempotent via vendor_data).
  */
 export const createDiditSession = async (
   userId: string,
@@ -73,8 +76,7 @@ export const createDiditSession = async (
 ): Promise<CreateSessionResult> => {
   const { apiKey, workflowId, baseUrl } = getDiditConfig();
 
-  // Use the app's deep-link scheme for mobile callback
-  // Didit appends: ?verificationSessionId=xxx&status=Approved
+  // Deep-link callback — Didit appends ?verificationSessionId=xxx&status=Approved
   const callback = callbackUrl || 'drivegaadi://kyc-callback';
 
   logger.info('[Didit Session] Creating verification session', { userId, workflowId, callback });
@@ -84,15 +86,11 @@ export const createDiditSession = async (
     response = await axios.post(
       `${baseUrl}/v3/session/`,
       {
-        workflow_id:      workflowId,
-        vendor_data:      `user-${userId}`,
+        workflow_id:  workflowId,
+        vendor_data:  `user-${userId}`,
         callback,
-        callback_method:  'both',
-        language:         'hi',
-        expected_details: {
-          id_country:              'IND',
-          expected_document_types: ['ID', 'DL'],
-        },
+        callback_method: 'both',
+        language: 'en',
       },
       {
         headers: {
@@ -103,7 +101,6 @@ export const createDiditSession = async (
       }
     );
   } catch (err: any) {
-    // Log the full Didit error response so we can debug 4xx issues
     const diditError = err?.response?.data;
     logger.error('[Didit Session] Didit API returned an error', {
       status:   err?.response?.status,
@@ -114,7 +111,8 @@ export const createDiditSession = async (
     throw new AppError(
       diditError?.message ||
       diditError?.detail  ||
-      diditError?.error   ||
+      (typeof diditError?.workflow_id === 'string' ? diditError.workflow_id : null) ||
+      (Array.isArray(diditError?.workflow_id) ? diditError.workflow_id[0] : null) ||
       `Didit API error: ${err?.response?.status ?? err?.message}`,
       err?.response?.status ?? 500
     );
@@ -122,16 +120,16 @@ export const createDiditSession = async (
 
   const { session_id, url, status } = response.data;
 
-  logger.info('[Didit Session] Session created', { userId, session_id, status });
+  logger.info('[Didit Session] Session created', { userId, session_id, status, url });
 
-  // Store session_id in DB so we can cross-reference on webhook arrival
+  // Store session_id in DB for cross-reference on webhook arrival
   await prisma.kycVerification.upsert({
     where:  { userId },
     update: { diditSessionId: session_id },
     create: { userId, diditSessionId: session_id },
-  }).catch((err) => {
-    // Non-fatal: log and continue — webhook will still work via vendor_data
-    logger.warn('[Didit Session] Could not store session_id', { userId, err: err?.message });
+  }).catch((dbErr) => {
+    // Non-fatal — webhook still works via vendor_data
+    logger.warn('[Didit Session] Could not store session_id in DB', { userId, err: dbErr?.message });
   });
 
   return {
@@ -141,15 +139,65 @@ export const createDiditSession = async (
   };
 };
 
-// ── Retrieve Session Result ──────────────────────────────────────────────────
+// ── Session Confirm (called from mobile after deep-link callback) ────────────
 
 /**
- * Fetch the full decision for a session.
- * Use this to manually check status (e.g. on app foreground after callback).
+ * Fetch the decision from Didit and update the DB if Approved/Declined.
+ * This is the "belt and suspenders" — the webhook ALSO updates the DB,
+ * but the mobile app calls this immediately after the callback redirect
+ * so the user doesn't have to wait for the webhook.
  */
-export const getSessionDecision = async (sessionId: string): Promise<any> => {
+export const confirmDiditSession = async (
+  sessionId: string,
+  userId: string
+): Promise<ConfirmSessionResult> => {
   const { apiKey, baseUrl } = getDiditConfig();
 
+  logger.info('[Didit Confirm] Fetching decision', { sessionId, userId });
+
+  let decision: any;
+  try {
+    const response = await axios.get(
+      `${baseUrl}/v3/session/${sessionId}/decision/`,
+      {
+        headers: { 'x-api-key': apiKey },
+        timeout: 10000,
+      }
+    );
+    decision = response.data;
+  } catch (err: any) {
+    logger.error('[Didit Confirm] Failed to fetch decision', {
+      sessionId,
+      status: err?.response?.status,
+      error:  err?.response?.data,
+    });
+    throw new AppError(
+      `Could not fetch verification result: ${err?.response?.status ?? err?.message}`,
+      err?.response?.status ?? 500
+    );
+  }
+
+  const status = decision.status; // Approved | Declined | In Review | In Progress | Not Started
+  logger.info('[Didit Confirm] Decision received', { sessionId, status });
+
+  if (status === 'Approved') {
+    await markKycCompleted(userId, sessionId, decision);
+    return { sessionId, status, kycCompleted: true };
+  }
+
+  if (status === 'Declined') {
+    await markKycFailed(userId, sessionId, decision);
+    return { sessionId, status, kycCompleted: false };
+  }
+
+  // In Progress, Not Started, In Review, Expired, Abandoned — don't update DB yet
+  return { sessionId, status, kycCompleted: false };
+};
+
+// ── Retrieve Session Decision (raw) ──────────────────────────────────────────
+
+export const getSessionDecision = async (sessionId: string): Promise<any> => {
+  const { apiKey, baseUrl } = getDiditConfig();
   const response = await axios.get(
     `${baseUrl}/v3/session/${sessionId}/decision/`,
     {
@@ -160,12 +208,74 @@ export const getSessionDecision = async (sessionId: string): Promise<any> => {
   return response.data;
 };
 
+// ── DB Mutation Helpers ─────────────────────────────────────────────────────
+
+async function markKycCompleted(userId: string, sessionId: string, decision: any) {
+  const faceMatch = decision?.face_matches?.[0];
+
+  await prisma.kycVerification.upsert({
+    where:  { userId },
+    update: {
+      status:          KycStatus.COMPLETED,
+      aadhaarVerified: true,
+      panVerified:     true,
+      dlVerified:      true,
+      faceMatchPassed: true,
+      faceMatchScore:  faceMatch?.similarity_score ?? null,
+      diditSessionId:  sessionId,
+      completedAt:     new Date(),
+      failureReason:   null,
+    },
+    create: {
+      userId,
+      status:          KycStatus.COMPLETED,
+      aadhaarVerified: true,
+      panVerified:     true,
+      dlVerified:      true,
+      faceMatchPassed: true,
+      faceMatchScore:  faceMatch?.similarity_score ?? null,
+      diditSessionId:  sessionId,
+      completedAt:     new Date(),
+      failureReason:   null,
+    },
+  });
+
+  await prisma.driverProfile.updateMany({
+    where: { userId },
+    data:  {
+      documentsVerified:     true,
+      backgroundCheckStatus: VerificationStatus.VERIFIED,
+    },
+  });
+
+  logger.info('[Didit] KYC marked COMPLETED', { userId, sessionId });
+}
+
+async function markKycFailed(userId: string, sessionId: string, decision: any) {
+  const reason = decision?.id_verifications?.[0]?.warnings?.join(', ')
+    || decision?.face_matches?.[0]?.warnings?.join(', ')
+    || 'Verification declined by Didit.';
+
+  await prisma.kycVerification.upsert({
+    where:  { userId },
+    update: {
+      status:         KycStatus.FAILED,
+      failureReason:  reason,
+      diditSessionId: sessionId,
+    },
+    create: {
+      userId,
+      status:         KycStatus.FAILED,
+      failureReason:  reason,
+      diditSessionId: sessionId,
+    },
+  });
+
+  logger.info('[Didit] KYC marked FAILED', { userId, sessionId, reason });
+}
+
 // ── Webhook Signature Verification ──────────────────────────────────────────
 
-/**
- * Verify Didit webhook signature using X-Signature-V2 (recommended).
- * V2 signs sorted, unicode-preserved compact JSON — survives middleware re-encoding.
- */
 export const verifyWebhookSignature = (
   body: Record<string, any>,
   signatureV2: string | undefined,
@@ -174,7 +284,7 @@ export const verifyWebhookSignature = (
 ): boolean => {
   if (!WEBHOOK_SECRET) {
     logger.warn('[Didit Webhook] DIDIT_WEBHOOK_SECRET not set — skipping signature verification');
-    return true; // skip in dev if no secret configured
+    return true;
   }
   if (!timestamp) return false;
 
@@ -184,7 +294,7 @@ export const verifyWebhookSignature = (
     return false;
   }
 
-  // Try V2 first (recommended — full body authentication)
+  // V2 signature (recommended — signs full body)
   if (signatureV2) {
     const canonical = JSON.stringify(sortKeysDeep(shortenFloats(body)));
     const expected = crypto.createHmac('sha256', WEBHOOK_SECRET)
@@ -193,7 +303,7 @@ export const verifyWebhookSignature = (
     if (timingSafeEqual(expected, signatureV2)) return true;
   }
 
-  // Fallback: Simple signature (envelope only — does not authenticate decision body)
+  // Simple signature (envelope only)
   if (signatureSimple) {
     const canonical = [
       body.timestamp ?? '',
@@ -205,7 +315,7 @@ export const verifyWebhookSignature = (
       .update(canonical)
       .digest('hex');
     if (timingSafeEqual(expected, signatureSimple)) {
-      logger.warn('[Didit Webhook] Verified with Simple signature only — decision body unverified');
+      logger.warn('[Didit Webhook] Verified with Simple signature — decision body unverified');
       return true;
     }
   }
@@ -215,10 +325,6 @@ export const verifyWebhookSignature = (
 
 // ── Webhook Event Handler ────────────────────────────────────────────────────
 
-/**
- * Process a verified Didit webhook event.
- * On "Approved" — marks the driver's KYC as COMPLETED in the DB.
- */
 export const handleDiditWebhookEvent = async (payload: WebhookPayload): Promise<void> => {
   const { webhook_type, status, vendor_data, session_id, decision } = payload;
 
@@ -229,7 +335,6 @@ export const handleDiditWebhookEvent = async (payload: WebhookPayload): Promise<
     return;
   }
 
-  // Extract userId from vendor_data (we set it as "user-{userId}")
   const userId = vendor_data?.startsWith('user-') ? vendor_data.slice(5) : null;
   if (!userId) {
     logger.warn('[Didit Webhook] Could not extract userId from vendor_data', { vendor_data });
@@ -237,73 +342,11 @@ export const handleDiditWebhookEvent = async (payload: WebhookPayload): Promise<
   }
 
   if (status === 'Approved') {
-    logger.info('[Didit Webhook] Session Approved — marking KYC complete', { userId });
-
-    const faceMatch = decision?.face_matches?.[0];
-
-    await prisma.kycVerification.upsert({
-      where:  { userId },
-      update: {
-        status:          KycStatus.COMPLETED,
-        aadhaarVerified: true,
-        panVerified:     true,
-        dlVerified:      true,
-        faceMatchPassed: true,
-        faceMatchScore:  faceMatch?.similarity_score ?? null,
-        diditSessionId:  session_id,
-        completedAt:     new Date(),
-        failureReason:   null,
-      },
-      create: {
-        userId,
-        status:          KycStatus.COMPLETED,
-        aadhaarVerified: true,
-        panVerified:     true,
-        dlVerified:      true,
-        faceMatchPassed: true,
-        faceMatchScore:  faceMatch?.similarity_score ?? null,
-        diditSessionId:  session_id,
-        completedAt:     new Date(),
-        failureReason:   null,
-      },
-    });
-
-    // Mark driver profile as documents verified
-    await prisma.driverProfile.updateMany({
-      where: { userId },
-      data:  {
-        documentsVerified:     true,
-        backgroundCheckStatus: VerificationStatus.VERIFIED,
-      },
-    });
-
-    logger.info('[Didit Webhook] KYC marked COMPLETED', { userId });
-
+    await markKycCompleted(userId, session_id, decision);
   } else if (status === 'Declined') {
-    logger.info('[Didit Webhook] Session Declined', { userId });
-
-    const reason = decision?.id_verifications?.[0]?.warnings?.join(', ')
-      || decision?.face_matches?.[0]?.warnings?.join(', ')
-      || 'Verification declined by Didit.';
-
-    await prisma.kycVerification.upsert({
-      where:  { userId },
-      update: {
-        status:         KycStatus.FAILED,
-        failureReason:  reason,
-        diditSessionId: session_id,
-      },
-      create: {
-        userId,
-        status:         KycStatus.FAILED,
-        failureReason:  reason,
-        diditSessionId: session_id,
-      },
-    });
-
+    await markKycFailed(userId, session_id, decision);
   } else if (status === 'In Review') {
     logger.info('[Didit Webhook] Session In Review — manual review pending', { userId });
-    // Optionally notify driver that their KYC is being reviewed
   } else {
     logger.info('[Didit Webhook] Unhandled status', { status, userId });
   }

@@ -13,8 +13,11 @@ router.use(requireDriver);
 // Returns: { verificationUrl, sessionId, status }
 router.post('/create', DiditSessionController.createSession);
 
-// Poll Didit for the decision on a specific session
-// Used after the deep-link callback to confirm Approved/Declined server-side
+// Confirm session decision (called after deep-link callback from mobile)
+// Fetches decision from Didit, updates DB, returns { sessionId, status, kycCompleted }
+router.post('/:sessionId/confirm', DiditSessionController.confirmSession);
+
+// Raw decision from Didit (optional polling)
 router.get('/:sessionId/decision', DiditSessionController.getDecision);
 
 export default router;
