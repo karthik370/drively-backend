@@ -11,10 +11,18 @@
  */
 import axios from 'axios';
 import crypto from 'crypto';
+import { v2 as cloudinary } from 'cloudinary';
 import { KycStatus, VerificationStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { logger } from '../utils/logger';
 import { AppError } from '../middleware/errorHandler';
+
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -268,6 +276,39 @@ async function markKycCompleted(userId: string, sessionId: string, decision: any
   });
 
   logger.info('[Didit] KYC marked COMPLETED', { userId, sessionId });
+
+  // ── Auto-upload selfie from Didit face_match to Cloudinary ──────────────
+  // Didit returns a short-lived presigned URL in face_matches[0].user_image_url
+  // We download it immediately and store permanently in Cloudinary as profileImage
+  const selfieUrl: string | undefined = faceMatch?.user_image_url;
+
+  if (selfieUrl) {
+    try {
+      logger.info('[Didit] Auto-uploading Didit liveness selfie to Cloudinary', { userId, selfieUrl: selfieUrl.slice(0, 60) + '...' });
+
+      const uploadResult = await cloudinary.uploader.upload(selfieUrl, {
+        folder:        `drivemate/${userId}/kyc-selfie`,
+        public_id:     `selfie_${Date.now()}`,
+        resource_type: 'image',
+        overwrite:     true,
+      });
+
+      const cloudinaryUrl = uploadResult.secure_url;
+      logger.info('[Didit] Selfie uploaded to Cloudinary', { userId, url: cloudinaryUrl });
+
+      await prisma.user.update({
+        where: { id: userId },
+        data:  { profileImage: cloudinaryUrl },
+      });
+
+      logger.info('[Didit] user.profileImage updated from Didit liveness selfie', { userId });
+    } catch (err: any) {
+      // Non-fatal — KYC is still marked complete, driver just won't have a profile photo yet
+      logger.error('[Didit] Failed to auto-upload selfie from Didit', { userId, error: err?.message });
+    }
+  } else {
+    logger.warn('[Didit] No user_image_url in face_matches — profile photo not auto-set', { userId, faceMatchKeys: Object.keys(faceMatch || {}) });
+  }
 }
 
 async function markKycFailed(userId: string, sessionId: string, decision: any) {
