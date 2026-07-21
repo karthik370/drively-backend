@@ -47,6 +47,25 @@ const getDiditConfig = () => {
 
 const WEBHOOK_SECRET = process.env.DIDIT_WEBHOOK_SECRET || '';
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Didit embeds the session language in the URL path:
+ *   https://verify.didit.me/hi/session/abc → https://verify.didit.me/en/session/abc
+ *
+ * This ensures that any stored session URL (including older ones created before
+ * we pinned language:'en') always opens in English.
+ */
+function normalizeDiditUrl(url: string): string {
+  // Match pattern: https://verify.didit.me/{lang}/session/{id}
+  // where {lang} is a 2-5 char locale code
+  return url.replace(
+    /^(https?:\/\/[^/]+)\/[a-z]{2,5}(\/session\/)/i,
+    '$1/en$2'
+  );
+}
+
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type CreateSessionResult = {
@@ -130,10 +149,14 @@ export const createDiditSession = async (
 
   logger.info('[Didit Session] Session created', { userId, session_id, status, url });
 
-  // Store session_id + URL in DB for cross-reference on webhook and session resume.
+  // Normalise URL to English — Didit embeds the language in the URL path segment
+  // e.g. https://verify.didit.me/hi/session/... → https://verify.didit.me/en/session/...
+  const normalizedUrl = normalizeDiditUrl(url);
+
+  // Store session_id + normalised URL in DB.
   // IMPORTANT: do NOT downgrade status if user is already REVIEW_PENDING or COMPLETED
-  // (Didit returns the same session idempotently — status from Didit is 'Not Started'
-  // even if user finished all steps and it's under review)
+  // (Didit returns the same session idempotently — its own "status" field may say "Not Started"
+  //  even when the user has completed all steps and is under manual review)
   try {
     const existing = await prisma.kycVerification.findUnique({ where: { userId } });
     const keepStatus = existing?.status === KycStatus.REVIEW_PENDING
@@ -143,25 +166,23 @@ export const createDiditSession = async (
       where:  { userId },
       update: {
         diditSessionId:  session_id,
-        diditSessionUrl: url,
-        // Only set IN_PROGRESS if not already in a more advanced state
+        diditSessionUrl: normalizedUrl,
         ...(keepStatus ? {} : { status: KycStatus.IN_PROGRESS }),
       },
       create: {
         userId,
         diditSessionId:  session_id,
-        diditSessionUrl: url,
+        diditSessionUrl: normalizedUrl,
         status:          KycStatus.IN_PROGRESS,
       },
     });
   } catch (dbErr: any) {
-    // Non-fatal — webhook still works via vendor_data
     logger.warn('[Didit Session] Could not store session_id in DB', { userId, err: dbErr?.message });
   }
 
   return {
     sessionId:       session_id,
-    verificationUrl: url,
+    verificationUrl: normalizedUrl,
     status,
   };
 };

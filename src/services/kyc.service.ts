@@ -540,7 +540,10 @@ export const getKycStatus = async (userId: string) => {
     aadhaarDob: kyc.aadhaarDob ? kyc.aadhaarDob.toISOString().split('T')[0] : null,
     aadhaarName: kyc.aadhaarName || null,
     diditSessionId: kyc.diditSessionId || null,
-    diditSessionUrl: kyc.diditSessionUrl || null,
+    // Normalise language segment in URL to English — handles old sessions stored with /hi/ etc.
+    diditSessionUrl: kyc.diditSessionUrl
+      ? kyc.diditSessionUrl.replace(/^(https?:\/\/[^/]+)\/[a-z]{2,5}(\/session\/)/i, '$1/en$2')
+      : null,
   };
 };
 
