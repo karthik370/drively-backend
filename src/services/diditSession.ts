@@ -16,6 +16,7 @@ import { KycStatus, VerificationStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { logger } from '../utils/logger';
 import { AppError } from '../middleware/errorHandler';
+import { getSocketServer } from '../socket/io';
 
 // Configure Cloudinary
 cloudinary.config({
@@ -377,6 +378,21 @@ async function markKycCompleted(userId: string, sessionId: string, decision: any
       userId,
       faceMatchKeys: Object.keys(faceMatch || {}),
     });
+  }
+
+  // ── Notify mobile app via socket so it refreshes without app restart ────
+  try {
+    const io = getSocketServer();
+    io.to(`user:${userId}`).emit('driver:verification-updated', {
+      driverId: userId,
+      documentsVerified: true,
+      backgroundCheckStatus: 'VERIFIED',
+      updatedAt: new Date().toISOString(),
+    });
+    logger.info('[Didit] Emitted driver:verification-updated via socket', { userId });
+  } catch (err: any) {
+    // Non-fatal — app will pick it up on next refresh/restart
+    logger.warn('[Didit] Could not emit socket event', { userId, error: err?.message });
   }
 }
 
