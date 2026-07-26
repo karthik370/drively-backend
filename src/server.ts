@@ -113,7 +113,7 @@ const corsOrigins = (() => {
   }
   // If nothing configured, allow the known production domain
   if (origins.length === 0) {
-    origins.push('https://v2.kurnm.click');
+    origins.push('https://v3.kurnm.click');
     origins.push(/^https?:\/\/localhost(:\d+)?$/);
   }
   return origins;

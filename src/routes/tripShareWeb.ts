@@ -28,7 +28,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     // Falls back to the same key as mobile (which may have restrictions)
     const googleMapsKey = process.env.GOOGLE_MAPS_WEB_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
     const appScheme = 'drivegaadi';
-    const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v2.kurnm.click';
+    const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v3.kurnm.click';
 
     // Determine trip state
     const isActive = !['COMPLETED', 'CANCELLED'].includes(trip.status);
@@ -860,7 +860,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
       "'self'",
       'https://maps.googleapis.com',
       baseUrl,  // include dynamic API URL so polling works on all deployments
-      'https://v2.kurnm.click',
+      'https://v3.kurnm.click',
     ].filter((v, i, a) => a.indexOf(v) === i).join(' ');
     res.setHeader('Content-Security-Policy',
       "default-src 'self'; " +
