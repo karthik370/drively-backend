@@ -2,6 +2,13 @@ import crypto from 'crypto';
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 
+// Always resolve to the canonical base URL — normalises stale env vars (v2 → v3)
+const getBaseUrl = (): string => {
+    const raw = process.env.APP_URL || process.env.API_URL || 'https://v3.kurnm.click';
+    // Auto-correct if someone forgot to update the env var after a domain migration
+    return raw.replace(/\/\/v2\./gi, '//v3.');
+};
+
 export class TripShareService {
     static async createShareLink(bookingId: string, userId: string): Promise<{ shareToken: string; shareUrl: string }> {
         const booking: any = await prisma.booking.findUnique({
@@ -13,14 +20,14 @@ export class TripShareService {
         if (booking.customerId !== userId && booking.driverId !== userId) throw new AppError('Unauthorized', 403);
 
         if (booking.shareToken) {
-            const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v3.kurnm.click';
+            const baseUrl = getBaseUrl();
             return { shareToken: booking.shareToken, shareUrl: `${baseUrl}/track/${booking.shareToken}` };
         }
 
         const shareToken = crypto.randomBytes(16).toString('hex');
         await prisma.booking.update({ where: { id: bookingId }, data: { shareToken } as any });
 
-        const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v3.kurnm.click';
+        const baseUrl = getBaseUrl();
         return { shareToken, shareUrl: `${baseUrl}/track/${shareToken}` };
     }
 

@@ -1,8 +1,14 @@
-﻿import { Router, Request, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import { TripShareService } from '../services/tripShare.service';
 import { logger } from '../utils/logger';
 
 const router = Router();
+
+// Normalise base URL — replaces stale v2 domain with v3 automatically
+const getBaseUrl = (): string => {
+  const raw = process.env.APP_URL || process.env.API_URL || 'https://v3.kurnm.click';
+  return raw.replace(/\/\/v2\./gi, '//v3.');
+};
 
 // SECURITY: HTML-escape user-provided strings before embedding in SSR HTML
 const escapeHtml = (str: string): string =>
@@ -28,7 +34,7 @@ router.get('/track/:shareToken', async (req: Request, res: Response) => {
     // Falls back to the same key as mobile (which may have restrictions)
     const googleMapsKey = process.env.GOOGLE_MAPS_WEB_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
     const appScheme = 'drivegaadi';
-    const baseUrl = process.env.APP_URL || process.env.API_URL || 'https://v3.kurnm.click';
+    const baseUrl = getBaseUrl();
 
     // Determine trip state
     const isActive = !['COMPLETED', 'CANCELLED'].includes(trip.status);
