@@ -2,6 +2,7 @@ import prisma from '../config/database';
 import { hashPassword, comparePassword } from '../utils/encryption';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt';
 import { AppError } from '../middleware/errorHandler';
+import { invalidateUserProfileCache } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import { User, UserType } from '@prisma/client';
 // Unused imports commented out
@@ -336,6 +337,8 @@ export class AuthService {
         isValid: false,
       },
     });
+    // Clear user profile cache so blocked/deactivated state takes effect immediately
+    invalidateUserProfileCache(userId);
   }
 
   static async logoutAllDevices(userId: string): Promise<void> {
@@ -343,6 +346,8 @@ export class AuthService {
       where: { userId },
       data: { isValid: false },
     });
+    // Clear user profile cache immediately
+    invalidateUserProfileCache(userId);
   }
 
   static async socialLogin(

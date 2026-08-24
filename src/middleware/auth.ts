@@ -2,8 +2,22 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AppError, asyncHandler } from './errorHandler';
 import prisma from '../config/database';
-import { cacheGet } from '../config/redis';
+import { cacheGet, cacheSet, cacheDel } from '../config/redis';
 import { BookingStatus, UserType } from '@prisma/client';
+
+// ── User profile cache ────────────────────────────────────────────────────────
+// Every authenticated API request (REST + socket) previously hit the DB to fetch
+// the user row. With this cache, the DB is only queried once per 5 minutes per user.
+// The cache is cleared immediately on logout and logoutAllDevices.
+const USER_PROFILE_CACHE_TTL = 300; // 5 minutes
+const userProfileCacheKey = (userId: string) => `user_profile:${userId}`;
+
+export const invalidateUserProfileCache = (userId: string): void => {
+  cacheDel(userProfileCacheKey(userId)).catch(() => {
+    // Non-fatal — cache will expire naturally
+  });
+};
+
 
 const normalizePhoneDigits = (phone: string): string => {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -71,18 +85,42 @@ export const authenticate = asyncHandler(
         isVerified: boolean;
       };
 
-      const user = await prisma.user.findUnique({
-        where: { id: decoded.id },
-        select: {
-          id: true,
-          phoneNumber: true,
-          email: true,
-          userType: true,
-          isVerified: true,
-          isActive: true,
-          isBlocked: true,
-        },
-      });
+      // ── Redis user profile cache ──────────────────────────────────────────
+      // Avoid a DB query on every request. Cache is cleared on logout.
+      type CachedUser = {
+        id: string; phoneNumber: string; email: string | null;
+        userType: UserType; isVerified: boolean; isActive: boolean; isBlocked: boolean;
+      };
+      let user: CachedUser | null = null;
+      try {
+        const cached = await cacheGet(userProfileCacheKey(decoded.id));
+        if (cached) {
+          user = JSON.parse(cached) as CachedUser;
+        }
+      } catch {
+        // Redis unavailable — fall through to DB
+      }
+
+      if (!user) {
+        user = await prisma.user.findUnique({
+          where: { id: decoded.id },
+          select: {
+            id: true,
+            phoneNumber: true,
+            email: true,
+            userType: true,
+            isVerified: true,
+            isActive: true,
+            isBlocked: true,
+          },
+        }) as CachedUser | null;
+
+        if (user) {
+          // Populate cache fire-and-forget — never block the request
+          cacheSet(userProfileCacheKey(user.id), JSON.stringify(user), USER_PROFILE_CACHE_TTL)
+            .catch(() => {});
+        }
+      }
 
       if (!user) {
         throw new AppError('User not found', 404);

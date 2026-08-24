@@ -17,6 +17,9 @@ export class SubscriptionService {
                 planPrice: 50,
                 validUntil: null,
                 isExpired: true,
+                freeMonthsEarned: 0,
+                freeMonthsUsed: 0,
+                freeMonthsRemaining: 0,
             };
         }
 
@@ -31,12 +34,19 @@ export class SubscriptionService {
             sub.status = SubscriptionStatus.EXPIRED;
         }
 
+        const freeMonthsEarned = (sub as any).freeMonthsEarned ?? 0;
+        const freeMonthsUsed = (sub as any).freeMonthsUsed ?? 0;
+        const freeMonthsRemaining = Math.max(0, freeMonthsEarned - freeMonthsUsed);
+
         return {
             hasSubscription: true,
             status: sub.status,
             planPrice: Number(sub.planPrice),
             validUntil: sub.validUntil,
             isExpired,
+            freeMonthsEarned,
+            freeMonthsUsed,
+            freeMonthsRemaining,
         };
     }
 
@@ -50,6 +60,43 @@ export class SubscriptionService {
             throw new AppError('Driver profile not found', 404);
         }
 
+        // ── Check for unused referral free months first ──────────────────────
+        const existingSub = await prisma.driverSubscription.findUnique({
+            where: { driverId: params.driverId },
+        });
+        const freeMonthsEarned = (existingSub as any)?.freeMonthsEarned ?? 0;
+        const freeMonthsUsed = (existingSub as any)?.freeMonthsUsed ?? 0;
+        const freeMonthsRemaining = Math.max(0, freeMonthsEarned - freeMonthsUsed);
+
+        if (freeMonthsRemaining > 0) {
+            // Auto-activate one free month without payment
+            const now = new Date();
+            const currentExpiry = existingSub?.status === SubscriptionStatus.ACTIVE && existingSub.validUntil && existingSub.validUntil > now
+                ? existingSub.validUntil
+                : now;
+            const newValidUntil = new Date(currentExpiry.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+            const updatedSub = await prisma.driverSubscription.update({
+                where: { driverId: params.driverId },
+                data: {
+                    status: SubscriptionStatus.ACTIVE,
+                    validUntil: newValidUntil,
+                    freeMonthsUsed: { increment: 1 },
+                } as any,
+            });
+
+            logger.info(`[Subscription] Free month activated for driver ${params.driverId} until ${newValidUntil.toISOString()}`);
+
+            return {
+                subscriptionId: updatedSub.id,
+                isFreeMonth: true,
+                freeMonthsRemaining: freeMonthsRemaining - 1,
+                validUntil: newValidUntil,
+                message: `1 free month activated! Valid until ${newValidUntil.toLocaleDateString('en-IN')}`,
+            };
+        }
+
+        // ── Normal paid flow ─────────────────────────────────────────────────
         const user = await prisma.user.findUnique({
             where: { id: params.driverId },
             select: { phoneNumber: true, email: true, firstName: true, lastName: true },
@@ -100,9 +147,7 @@ export class SubscriptionService {
 
         const sub = await prisma.driverSubscription.upsert({
             where: { driverId: params.driverId },
-            update: {
-                lastPaymentId: payment.id,
-            },
+            update: { lastPaymentId: payment.id },
             create: {
                 driverId: params.driverId,
                 status: SubscriptionStatus.INACTIVE,
@@ -113,6 +158,7 @@ export class SubscriptionService {
 
         return {
             subscriptionId: sub.id,
+            isFreeMonth: false,
             orderId: cfOrder.orderId,
             paymentSessionId: cfOrder.paymentSessionId,
             amount: cfOrder.orderAmount,

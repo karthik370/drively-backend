@@ -632,8 +632,11 @@ model DriverSubscription {
   planPrice     Decimal            @db.Decimal(10, 2) @default(500)
   validUntil    DateTime?
   lastPaymentId String?            @unique
-  payment       Payment?           @relation(fields: [lastPaymentId], references: [id])
-  createdAt     DateTime           @default(now())
+  payment           Payment?           @relation(fields: [lastPaymentId], references: [id])
+  freeMonthsEarned  Int                @default(0)
+  freeMonthsUsed    Int                @default(0)
+  createdAt         DateTime           @default(now())
+
   updatedAt     DateTime           @updatedAt
 
   @@map("driver_subscriptions")

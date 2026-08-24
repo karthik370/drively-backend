@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { Prisma, WalletTransactionType, WalletTransactionReason, WalletTransactionStatus } from '@prisma/client';
+import { Prisma, WalletTransactionType, WalletTransactionReason, WalletTransactionStatus, SubscriptionStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -7,16 +7,25 @@ import { sendExpoPushNotification } from './expoPush.service';
 
 // ── Reward amounts ──────────────────────────────────────────────────────────
 const REFERRAL_REWARDS = {
-    DRIVER:   { referrer: 100, referred: 75  },   // ₹100 for referrer, ₹75 for new driver
-    CUSTOMER: { referrer: 100, referred: 50  },    // ₹100 for referrer, ₹50 for new customer
+    DRIVER:              { referrer: 100, referred: 75  },   // ₹100 for referrer, ₹75 for new driver
+    CUSTOMER:            { referrer: 100, referred: 50  },   // ₹100 for referrer, ₹50 for new customer
+    DRIVER_TO_CUSTOMER:  { referrer: 0,   referred: 0   },   // No wallet credit — only free subscription months
 };
+
+// ── Driver-to-Customer milestone thresholds ─────────────────────────────────
+const CUSTOMER_REFERRAL_MILESTONES = [
+    { count: 5,  freeMonths: 1 },
+    { count: 10, freeMonths: 2 },
+];
+
+type ReferralType = 'DRIVER' | 'CUSTOMER' | 'DRIVER_TO_CUSTOMER';
 
 export class ReferralService {
 
     // ────────────────────────────────────────────────────────────────────────
     // 1.  GET / CREATE the user's permanent referral code
     // ────────────────────────────────────────────────────────────────────────
-    static async getOrCreateCode(userId: string, type: 'DRIVER' | 'CUSTOMER') {
+    static async getOrCreateCode(userId: string, type: ReferralType) {
         // Check Referral table for an existing active code of this type
         const existing = await prisma.referral.findFirst({
             where: { referrerUserId: userId, referralType: type, status: 'PENDING' },
@@ -31,8 +40,14 @@ export class ReferralService {
             };
         }
 
-        // Generate a new permanent code  (DMC = customer, DMD = driver)
-        const prefix = type === 'DRIVER' ? 'DMD' : 'DMC';
+        // Generate a new permanent code
+        // DMC = customer-to-customer, DMD = driver-to-driver, DMX = driver-to-customer
+        const prefixMap: Record<ReferralType, string> = {
+            DRIVER: 'DMD',
+            CUSTOMER: 'DMC',
+            DRIVER_TO_CUSTOMER: 'DMX',
+        };
+        const prefix = prefixMap[type];
         const code = `${prefix}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
         const rewards = REFERRAL_REWARDS[type];
 
@@ -57,12 +72,13 @@ export class ReferralService {
 
     // ────────────────────────────────────────────────────────────────────────
     // 2.  APPLY a referral code  (new user enters code)
-    //     This only LINKS the user — reward happens after first ride
+    //     This only LINKS the user — reward happens after first qualifying ride
     // ────────────────────────────────────────────────────────────────────────
     static async applyReferralCode(referralCode: string, newUserId: string): Promise<{
         applied: boolean;
         referrerName: string;
         rewardOnFirstTrip: number;
+        type: string;
     }> {
         const code = referralCode.trim().toUpperCase();
 
@@ -84,7 +100,7 @@ export class ReferralService {
         });
         if (alreadyReferred) throw new AppError('You have already used a referral code', 400);
 
-        // Validate type match — customer code for customers, driver code for drivers
+        // Validate type match
         const newUser = await prisma.user.findUnique({
             where: { id: newUserId },
             select: { userType: true },
@@ -100,6 +116,10 @@ export class ReferralService {
         if (referral.referralType === 'CUSTOMER' && !isNewUserCustomer) {
             throw new AppError('This is a customer referral code. Register as a customer to use it.', 400);
         }
+        // DRIVER_TO_CUSTOMER: referrer must be driver, referred must be customer
+        if (referral.referralType === 'DRIVER_TO_CUSTOMER' && !isNewUserCustomer) {
+            throw new AppError('This code is for customers. Register as a customer to use it.', 400);
+        }
 
         // Create a new referral record for this specific referral event
         // (the original code stays PENDING so it can be reused for more referrals)
@@ -111,7 +131,7 @@ export class ReferralService {
                 referralType: referral.referralType,
                 rewardAmount: referral.rewardAmount,
                 referredReward: referral.referredReward,
-                status: 'COMPLETED', // applied, waiting for first ride to become REWARDED
+                status: 'COMPLETED', // applied, waiting for first qualifying ride to become REWARDED
             },
         });
 
@@ -122,18 +142,29 @@ export class ReferralService {
             code, newUserId, referrerId: referral.referrerUserId, type: referral.referralType,
         });
 
+        // For DRIVER_TO_CUSTOMER, the "reward" message is about free subscription, not wallet
+        const rewardOnFirstTrip = referral.referralType === 'DRIVER_TO_CUSTOMER'
+            ? 0
+            : Number(referral.referredReward);
+
         return {
             applied: true,
             referrerName,
-            rewardOnFirstTrip: Number(referral.referredReward),
+            rewardOnFirstTrip,
+            type: referral.referralType,
         };
     }
 
     // ────────────────────────────────────────────────────────────────────────
     // 3.  PROCESS FIRST-TRIP REWARD
-    //     Called from booking completion. If the user was referred and this is
-    //     their first completed trip → credit both wallets.
+    //     Called from booking completion. If the user was referred and the
+    //     referral hasn't been rewarded yet → validate trip → credit rewards.
     //     ⚠️ Anti-fraud guards prevent gaming via fake trips.
+    //
+    //     BUG FIX: Previously this checked completedTrips > 1 and returned,
+    //     permanently losing the reward if the first trip didn't qualify.
+    //     Now we check if the referral is already REWARDED instead — so any
+    //     subsequent qualifying trip will still trigger the reward.
     // ────────────────────────────────────────────────────────────────────────
     static async processFirstTripReward(userId: string, bookingId: string): Promise<void> {
         // Find pending (COMPLETED but not yet REWARDED) referral for this user
@@ -141,22 +172,7 @@ export class ReferralService {
             where: { referredUserId: userId, status: 'COMPLETED' },
         });
 
-        if (!referral) return; // Not a referred user, nothing to do
-
-        // Check this is actually their first completed trip
-        const completedTrips = await prisma.booking.count({
-            where: {
-                OR: [
-                    { customerId: userId, status: 'COMPLETED' },
-                    { driverId: userId, status: 'COMPLETED' },
-                ],
-            },
-        });
-
-        if (completedTrips > 1) {
-            // Not their first trip — they may have been rewarded already or applied code late
-            return;
-        }
+        if (!referral) return; // Not a referred user or already rewarded
 
         // ── ANTI-FRAUD GUARDS ────────────────────────────────────────────────
 
@@ -180,27 +196,25 @@ export class ReferralService {
         }
 
         // Guard 1: Minimum trip duration ≥ 45 minutes
-        const MIN_TRIP_DURATION_MS = 45 * 60 * 1000; // 45 minutes
+        const MIN_TRIP_DURATION_MS = 45 * 60 * 1000;
         if (booking.startedAt && booking.completedAt) {
             const durationMs = new Date(booking.completedAt).getTime() - new Date(booking.startedAt).getTime();
             if (durationMs < MIN_TRIP_DURATION_MS) {
-                logger.warn('Referral reward BLOCKED: trip too short', {
+                logger.info('Referral reward deferred: trip too short, will retry on next qualifying trip', {
                     bookingId, userId, durationMs, requiredMs: MIN_TRIP_DURATION_MS,
                 });
-                return;
+                return; // Don't block — just skip this trip, reward stays COMPLETED for next qualifying trip
             }
         } else {
-            logger.warn('Referral reward BLOCKED: missing start/complete timestamps', { bookingId, userId });
+            logger.warn('Referral reward deferred: missing start/complete timestamps', { bookingId, userId });
             return;
         }
 
         // Guard 2: Minimum actual trip distance ≥ 5 km
-        // Uses ONLY actualDistance (km driven from STARTED → COMPLETED).
-        // Intentionally ignores estimatedDistance — that's the pre-trip estimate, not real distance.
         const MIN_TRIP_DISTANCE_KM = 5;
         const tripDistanceKm = booking.actualDistance ? Number(booking.actualDistance) : 0;
         if (tripDistanceKm < MIN_TRIP_DISTANCE_KM) {
-            logger.warn('Referral reward BLOCKED: distance too short', {
+            logger.info('Referral reward deferred: distance too short, will retry on next qualifying trip', {
                 bookingId, userId, tripDistanceKm, requiredKm: MIN_TRIP_DISTANCE_KM,
             });
             return;
@@ -210,7 +224,7 @@ export class ReferralService {
         const MIN_FARE_AMOUNT = 250;
         const fareAmount = Number(booking.totalAmount || 0);
         if (fareAmount < MIN_FARE_AMOUNT) {
-            logger.warn('Referral reward BLOCKED: fare too low', {
+            logger.info('Referral reward deferred: fare too low, will retry on next qualifying trip', {
                 bookingId, userId, fareAmount, requiredFare: MIN_FARE_AMOUNT,
             });
             return;
@@ -252,9 +266,10 @@ export class ReferralService {
 
         // ── ALL GUARDS PASSED — proceed with reward ──────────────────────────
 
+        const isDriverToCustomer = referral.referralType === 'DRIVER_TO_CUSTOMER';
+        const isDriverReferral = referral.referralType === 'DRIVER';
         const referrerReward = Number(referral.rewardAmount);
         const referredReward = Number(referral.referredReward);
-        const isDriverReferral = referral.referralType === 'DRIVER';
 
         await prisma.$transaction(async (tx) => {
             // Mark referral as REWARDED
@@ -263,8 +278,13 @@ export class ReferralService {
                 data: { status: 'REWARDED', completedAt: new Date() },
             });
 
-            if (isDriverReferral) {
-                // ── Driver-to-Driver: credit driver wallet (pendingEarnings) ──
+            if (isDriverToCustomer) {
+                // ── Driver-to-Customer: NO wallet credits ──────────────────────
+                // Just count up and check milestones
+                await this.processCustomerReferralMilestone(tx, referral.referrerUserId);
+
+            } else if (isDriverReferral) {
+                // ── Driver-to-Driver: credit driver wallet (pendingEarnings) + transaction log ──
                 if (referrerReward > 0) {
                     await tx.driverProfile.updateMany({
                         where: { userId: referral.referrerUserId },
@@ -273,6 +293,25 @@ export class ReferralService {
                             pendingEarnings: { increment: referrerReward },
                         } as any,
                     });
+                    // Create wallet transaction record for audit
+                    const referrerDP = await tx.driverProfile.findUnique({
+                        where: { userId: referral.referrerUserId },
+                        select: { pendingEarnings: true },
+                    });
+                    if (referrerDP) {
+                        await tx.walletTransaction.create({
+                            data: {
+                                userId: referral.referrerUserId,
+                                type: WalletTransactionType.CREDIT,
+                                reason: WalletTransactionReason.REWARD,
+                                status: WalletTransactionStatus.COMPLETED,
+                                amount: new Prisma.Decimal(referrerReward),
+                                balanceAfter: referrerDP.pendingEarnings,
+                                bookingId,
+                                meta: { source: 'referral_driver', referralId: referral.id } as any,
+                            },
+                        });
+                    }
                 }
                 if (referredReward > 0) {
                     await tx.driverProfile.updateMany({
@@ -282,6 +321,24 @@ export class ReferralService {
                             pendingEarnings: { increment: referredReward },
                         } as any,
                     });
+                    const referredDP = await tx.driverProfile.findUnique({
+                        where: { userId: userId },
+                        select: { pendingEarnings: true },
+                    });
+                    if (referredDP) {
+                        await tx.walletTransaction.create({
+                            data: {
+                                userId: userId,
+                                type: WalletTransactionType.CREDIT,
+                                reason: WalletTransactionReason.REWARD,
+                                status: WalletTransactionStatus.COMPLETED,
+                                amount: new Prisma.Decimal(referredReward),
+                                balanceAfter: referredDP.pendingEarnings,
+                                bookingId,
+                                meta: { source: 'referral_driver_referred', referralId: referral.id } as any,
+                            },
+                        });
+                    }
                 }
             } else {
                 // ── Customer-to-Customer: credit customer wallet ──
@@ -357,52 +414,143 @@ export class ReferralService {
             });
             const referredName = referredUser?.firstName || 'Your referral';
 
-            // Notify referrer
-            await sendExpoPushNotification({
-                userIds: [referral.referrerUserId],
-                title: '🎉 Referral reward!',
-                body: isDriverReferral
-                    ? `${referredName} completed their first ride! ₹${referrerReward} has been added to your driver wallet.`
-                    : `${referredName} completed their first ride! ₹${referrerReward} has been added to your wallet.`,
-                data: { kind: 'referral_reward', amount: String(referrerReward) },
-            });
+            if (isDriverToCustomer) {
+                // Count how many DRIVER_TO_CUSTOMER referrals are now REWARDED for this referrer
+                const rewardedCount = await prisma.referral.count({
+                    where: { referrerUserId: referral.referrerUserId, referralType: 'DRIVER_TO_CUSTOMER', status: 'REWARDED' },
+                });
 
-            // Notify referred
-            await sendExpoPushNotification({
-                userIds: [userId],
-                title: '🎉 Welcome bonus!',
-                body: isDriverReferral
-                    ? `Congratulations on your first ride! ₹${referredReward} referral bonus has been added to your driver wallet.`
-                    : `Congratulations on your first ride! ₹${referredReward} referral bonus has been added to your wallet.`,
-                data: { kind: 'referral_reward', amount: String(referredReward) },
-            });
+                // Find next milestone
+                const nextMilestone = CUSTOMER_REFERRAL_MILESTONES.find(m => rewardedCount < m.count);
+                const hitMilestone = CUSTOMER_REFERRAL_MILESTONES.find(m => rewardedCount === m.count);
+
+                if (hitMilestone) {
+                    await sendExpoPushNotification({
+                        userIds: [referral.referrerUserId],
+                        title: '🎉 Free subscription earned!',
+                        body: `${rewardedCount} customers referred! You earned ${hitMilestone.freeMonths} FREE month${hitMilestone.freeMonths > 1 ? 's' : ''} of subscription!`,
+                        data: { kind: 'referral_milestone', freeMonths: String(hitMilestone.freeMonths) },
+                    });
+                } else if (nextMilestone) {
+                    await sendExpoPushNotification({
+                        userIds: [referral.referrerUserId],
+                        title: '🎯 Customer referral success!',
+                        body: `${referredName} completed their first ride! ${rewardedCount}/${nextMilestone.count} toward your free subscription month.`,
+                        data: { kind: 'referral_progress', count: String(rewardedCount), target: String(nextMilestone.count) },
+                    });
+                }
+            } else {
+                // Notify referrer (existing wallet-credit types)
+                await sendExpoPushNotification({
+                    userIds: [referral.referrerUserId],
+                    title: '🎉 Referral reward!',
+                    body: isDriverReferral
+                        ? `${referredName} completed their first ride! ₹${referrerReward} has been added to your driver wallet.`
+                        : `${referredName} completed their first ride! ₹${referrerReward} has been added to your wallet.`,
+                    data: { kind: 'referral_reward', amount: String(referrerReward) },
+                });
+
+                // Notify referred
+                await sendExpoPushNotification({
+                    userIds: [userId],
+                    title: '🎉 Welcome bonus!',
+                    body: isDriverReferral
+                        ? `Congratulations on your first ride! ₹${referredReward} referral bonus has been added to your driver wallet.`
+                        : `Congratulations on your first ride! ₹${referredReward} referral bonus has been added to your wallet.`,
+                    data: { kind: 'referral_reward', amount: String(referredReward) },
+                });
+            }
         } catch (e) {
             logger.warn('Failed to send referral reward notifications', { error: e });
         }
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    // 4.  GET referral stats
+    // 3a. Process customer-referral milestones → grant free subscription months
+    //     Called inside the processFirstTripReward transaction.
+    //     Milestones are cumulative: 5 = 1 month, 10 = 2 months total.
+    // ────────────────────────────────────────────────────────────────────────
+    private static async processCustomerReferralMilestone(
+        tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
+        driverId: string,
+    ): Promise<void> {
+        // Count total REWARDED DRIVER_TO_CUSTOMER referrals (including the one just marked)
+        const rewardedCount = await tx.referral.count({
+            where: { referrerUserId: driverId, referralType: 'DRIVER_TO_CUSTOMER', status: 'REWARDED' },
+        });
+
+        // Determine how many free months the driver has earned based on milestones
+        let totalFreeMonths = 0;
+        for (const milestone of CUSTOMER_REFERRAL_MILESTONES) {
+            if (rewardedCount >= milestone.count) {
+                totalFreeMonths = milestone.freeMonths;
+            }
+        }
+
+        if (totalFreeMonths > 0) {
+            // Upsert to ensure freeMonthsEarned is set correctly
+            await (tx as any).driverSubscription.upsert({
+                where: { driverId },
+                update: { freeMonthsEarned: totalFreeMonths },
+                create: {
+                    driverId,
+                    status: SubscriptionStatus.INACTIVE,
+                    planPrice: new Prisma.Decimal(50),
+                    freeMonthsEarned: totalFreeMonths,
+                    freeMonthsUsed: 0,
+                },
+            });
+
+            logger.info('Customer referral milestone updated', {
+                driverId,
+                rewardedCount,
+                totalFreeMonths,
+            });
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 4.  GET referral stats (for DRIVER and CUSTOMER same-type referrals)
     // ────────────────────────────────────────────────────────────────────────
     static async getReferralStats(userId: string) {
         const [totalReferrals, completedReferrals, rewardedReferrals, totalEarned, recentReferrals] = await Promise.all([
-            // People who applied this user's code
+            // People who applied this user's code (exclude DRIVER_TO_CUSTOMER here)
             prisma.referral.count({
-                where: { referrerUserId: userId, referredUserId: { not: null } },
+                where: {
+                    referrerUserId: userId,
+                    referredUserId: { not: null },
+                    referralType: { in: ['DRIVER', 'CUSTOMER'] },
+                },
             }),
             prisma.referral.count({
-                where: { referrerUserId: userId, status: { in: ['COMPLETED', 'REWARDED'] } },
+                where: {
+                    referrerUserId: userId,
+                    status: { in: ['COMPLETED', 'REWARDED'] },
+                    referralType: { in: ['DRIVER', 'CUSTOMER'] },
+                },
             }),
             prisma.referral.count({
-                where: { referrerUserId: userId, status: 'REWARDED' },
+                where: {
+                    referrerUserId: userId,
+                    status: 'REWARDED',
+                    referralType: { in: ['DRIVER', 'CUSTOMER'] },
+                },
             }),
             prisma.referral.aggregate({
-                where: { referrerUserId: userId, status: 'REWARDED' },
+                where: {
+                    referrerUserId: userId,
+                    status: 'REWARDED',
+                    referralType: { in: ['DRIVER', 'CUSTOMER'] },
+                },
                 _sum: { rewardAmount: true },
             }),
             // Recent referrals with names
             prisma.referral.findMany({
-                where: { referrerUserId: userId, referredUserId: { not: null } },
+                where: {
+                    referrerUserId: userId,
+                    referredUserId: { not: null },
+                    referralType: { in: ['DRIVER', 'CUSTOMER'] },
+                },
                 orderBy: { createdAt: 'desc' },
                 take: 20,
                 include: {
@@ -438,6 +586,91 @@ export class ReferralService {
                 status: myReferral.status,
                 reward: Number(myReferral.referredReward),
             } : null,
+        };
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 5.  GET driver's customer-referral stats (milestone progress + free months)
+    //     Drivers-only: shows their DRIVER_TO_CUSTOMER referral progress.
+    // ────────────────────────────────────────────────────────────────────────
+    static async getDriverCustomerReferralStats(driverId: string) {
+        // Get or create the DRIVER_TO_CUSTOMER code for this driver
+        const codeData = await this.getOrCreateCode(driverId, 'DRIVER_TO_CUSTOMER');
+
+        const [totalReferred, rewardedCount, recentReferrals] = await Promise.all([
+            // Customers who applied this driver's code
+            prisma.referral.count({
+                where: {
+                    referrerUserId: driverId,
+                    referredUserId: { not: null },
+                    referralType: 'DRIVER_TO_CUSTOMER',
+                },
+            }),
+            // Customers who completed a qualifying ride
+            prisma.referral.count({
+                where: {
+                    referrerUserId: driverId,
+                    referralType: 'DRIVER_TO_CUSTOMER',
+                    status: 'REWARDED',
+                },
+            }),
+            // Recent referrals
+            prisma.referral.findMany({
+                where: {
+                    referrerUserId: driverId,
+                    referredUserId: { not: null },
+                    referralType: 'DRIVER_TO_CUSTOMER',
+                },
+                orderBy: { createdAt: 'desc' },
+                take: 20,
+                include: {
+                    referredUser: { select: { firstName: true, lastName: true } },
+                },
+            }),
+        ]);
+
+        // Get subscription free month info
+        const sub = await prisma.driverSubscription.findUnique({
+            where: { driverId },
+            select: { freeMonthsEarned: true, freeMonthsUsed: true },
+        });
+
+        const freeMonthsEarned = sub?.freeMonthsEarned ?? 0;
+        const freeMonthsUsed = sub?.freeMonthsUsed ?? 0;
+        const freeMonthsRemaining = Math.max(0, freeMonthsEarned - freeMonthsUsed);
+
+        // Find next milestone
+        const nextMilestone = CUSTOMER_REFERRAL_MILESTONES.find(m => rewardedCount < m.count) ?? null;
+        const currentMilestone = [...CUSTOMER_REFERRAL_MILESTONES].reverse().find(m => rewardedCount >= m.count) ?? null;
+
+        return {
+            referralCode: codeData.referralCode,
+            totalReferred,
+            rewardedCount,
+            freeMonthsEarned,
+            freeMonthsUsed,
+            freeMonthsRemaining,
+            nextMilestone: nextMilestone ? {
+                target: nextMilestone.count,
+                freeMonths: nextMilestone.freeMonths,
+                remaining: nextMilestone.count - rewardedCount,
+            } : null,
+            currentMilestone: currentMilestone ? {
+                count: currentMilestone.count,
+                freeMonths: currentMilestone.freeMonths,
+            } : null,
+            milestones: CUSTOMER_REFERRAL_MILESTONES.map(m => ({
+                count: m.count,
+                freeMonths: m.freeMonths,
+                achieved: rewardedCount >= m.count,
+            })),
+            recentReferrals: recentReferrals.map(r => ({
+                id: r.id,
+                name: [r.referredUser?.firstName, r.referredUser?.lastName].filter(Boolean).join(' ') || 'Unknown',
+                status: r.status,
+                createdAt: r.createdAt,
+                completedAt: r.completedAt,
+            })),
         };
     }
 }

@@ -1,4 +1,4 @@
-﻿import { BookingStatus, CancelledBy, PaymentMethod, PaymentStatus, Prisma, TransmissionType, VehicleType } from '@prisma/client';
+import { BookingStatus, CancelledBy, PaymentMethod, PaymentStatus, Prisma, TransmissionType, VehicleType } from '@prisma/client';
 import prisma from '../config/database';
 
 import { AppError } from '../middleware/errorHandler';
@@ -680,6 +680,27 @@ export class BookingService {
     const io = getSocketServer();
     io.to(`user:${params.customerId}`).emit('booking:created', { bookingId: booking.id });
 
+    // ── Flush avail_bookings cache for ALL online drivers ────────────────────
+    // When a new booking is created, every polling driver's 4-second Redis cache
+    // would delay them seeing it. By deleting all avail_bookings:* keys, the
+    // next poll (within 1-3s) hits the DB and returns the new booking immediately.
+    // Socket-connected drivers already get booking:offer via MatchingService.
+    // This ensures polling drivers (background/reconnecting) don't miss it.
+    void (async () => {
+      try {
+        const { redisClient } = await import('../config/redis');
+        if (redisClient.status === 'ready') {
+          const keys = await redisClient.keys('avail_bookings:*');
+          if (keys.length > 0) {
+            await redisClient.del(...keys);
+            logger.info(`[BookingCache] Flushed ${keys.length} driver caches on new booking ${booking.id}`);
+          }
+        }
+      } catch {
+        // Non-fatal — polling drivers will just wait up to 4s (original behavior)
+      }
+    })();
+
     const scheduledAt = booking.scheduledTime ? new Date(booking.scheduledTime as any) : null;
     const now = Date.now();
     const shouldStartNow = !scheduledAt || scheduledAt.getTime() <= now;
@@ -690,6 +711,7 @@ export class BookingService {
           logger.error('Matching service failed', { error, bookingId: booking.id });
         });
       });
+
     } else {
       try {
         io.to('online-drivers').emit('booking:offer', {

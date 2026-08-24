@@ -16,7 +16,10 @@ router.use(authenticate);
 router.get('/referral/my-code', asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false }); return; }
-    const type = req.query.type === 'DRIVER' ? 'DRIVER' : 'CUSTOMER';
+    const rawType = req.query.type as string;
+    const type = (['DRIVER', 'CUSTOMER', 'DRIVER_TO_CUSTOMER'].includes(rawType))
+        ? rawType as 'DRIVER' | 'CUSTOMER' | 'DRIVER_TO_CUSTOMER'
+        : 'CUSTOMER';
     const data = await ReferralService.getOrCreateCode(userId, type);
     res.json({ success: true, data });
 }));
@@ -32,6 +35,17 @@ router.get('/referral/stats', asyncHandler(async (req: AuthRequest, res: Respons
     const userId = req.user?.id;
     if (!userId) { res.status(401).json({ success: false }); return; }
     const data = await ReferralService.getReferralStats(userId);
+    res.json({ success: true, data });
+}));
+
+// Driver-only: customer referral progress + free subscription milestone stats
+router.get('/referral/customer-referral-stats', asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) { res.status(401).json({ success: false }); return; }
+    if (req.user?.userType !== 'DRIVER') {
+        res.status(403).json({ success: false, message: 'Only drivers can access this' }); return;
+    }
+    const data = await ReferralService.getDriverCustomerReferralStats(userId);
     res.json({ success: true, data });
 }));
 
