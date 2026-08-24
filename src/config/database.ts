@@ -2,63 +2,90 @@ import { PrismaClient } from '@prisma/client';
 import { logger } from '../utils/logger';
 
 // ── Connection URL resolution ─────────────────────────────────────────────────
-// When PGBOUNCER_URL is set (Railway PgBouncer service), we connect through it.
-// PgBouncer manages the real PostgreSQL pool, so:
-//   - connection_limit=50      → app opens 50 connections TO PgBouncer (cheap)
-//   - pgbouncer=true           → disables Prisma prepared statements (required for
-//                                PgBouncer transaction mode — without this, you get
-//                                "prepared statement already exists" errors)
-//   - statement_cache_size=0   → double-ensures no prepared statements leak through
-//
-// When only DATABASE_URL is set (direct to PostgreSQL):
-//   - connection_limit=25      → safe for 1 Railway replica (leaves room for admin tools)
-//   - pool_timeout=30          → queued requests error after 30s instead of hanging forever
-//
-// Multi-replica tip: with PgBouncer, keep connection_limit=50 per replica (PgBouncer absorbs it).
-//                    Without PgBouncer, reduce per replica (2 replicas = 12 each, etc.)
+// Priority: PGBOUNCER_URL > DATABASE_URL
+// If PgBouncer is unreachable at startup, server falls back to direct PostgreSQL
+// instead of crashing.  A Proxy is used so all imports always see the live
+// PrismaClient even after the instance is replaced during fallback.
 
-const PGBOUNCER_URL = typeof process.env.PGBOUNCER_URL === 'string' ? process.env.PGBOUNCER_URL.trim() : '';
-const DATABASE_URL  = typeof process.env.DATABASE_URL  === 'string' ? process.env.DATABASE_URL.trim()  : '';
+const PGBOUNCER_URL = (process.env.PGBOUNCER_URL ?? '').trim();
+const DATABASE_URL  = (process.env.DATABASE_URL  ?? '').trim();
 
-const buildDatabaseUrl = (): string | undefined => {
-  if (PGBOUNCER_URL) {
-    // Through PgBouncer — disable prepared statements, generous app-side pool
-    const sep = PGBOUNCER_URL.includes('?') ? '&' : '?';
-    return `${PGBOUNCER_URL}${sep}pgbouncer=true&statement_cache_size=0&connection_limit=50&pool_timeout=30`;
-  }
-  if (DATABASE_URL) {
-    // Direct to PostgreSQL — conservative pool to protect the DB
-    const sep = DATABASE_URL.includes('?') ? '&' : '?';
-    return `${DATABASE_URL}${sep}connection_limit=25&pool_timeout=30`;
-  }
-  return undefined;
-};
+const appendParams = (base: string, params: string): string =>
+  `${base}${base.includes('?') ? '&' : '?'}${params}`;
 
-const prisma = new PrismaClient({
-  log: process.env.NODE_ENV === 'development'
-    ? ['query', 'error', 'warn']
-    : ['error'],
-  datasources: {
-    db: {
-      url: buildDatabaseUrl(),
+const makePgBouncerClient = () =>
+  new PrismaClient({
+    log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+    datasources: {
+      db: {
+        url: appendParams(
+          PGBOUNCER_URL,
+          'pgbouncer=true&statement_cache_size=0&connection_limit=50&pool_timeout=30'
+        ),
+      },
     },
-  },
-});
-
-prisma.$connect()
-  .then(() => {
-    const mode = PGBOUNCER_URL ? 'PgBouncer (pool=50)' : 'Direct PostgreSQL (pool=25)';
-    logger.info(`Database connected successfully [${mode}]`);
-  })
-  .catch((error) => {
-    logger.error('Database connection failed:', error);
-    process.exit(1);
   });
 
+const makeDirectClient = () =>
+  new PrismaClient({
+    log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+    datasources: {
+      db: {
+        url: appendParams(DATABASE_URL, 'connection_limit=25&pool_timeout=30'),
+      },
+    },
+  });
+
+// _current is the live PrismaClient.  We swap it on fallback.
+let _current: PrismaClient = PGBOUNCER_URL ? makePgBouncerClient() : makeDirectClient();
+
+// Stable Proxy export — all imports always delegate to _current.
+// This means reassigning _current is immediately visible to every service.
+const prisma = new Proxy(
+  {} as PrismaClient,
+  { get: (_t, prop) => (_current as any)[prop] }
+) as PrismaClient;
+
+// ── Connection bootstrap ──────────────────────────────────────────────────────
+const bootstrap = async () => {
+  if (PGBOUNCER_URL) {
+    try {
+      await _current.$connect();
+      logger.info('Database connected successfully [PgBouncer (pool=50)]');
+      return;
+    } catch (pgErr: any) {
+      logger.warn('PgBouncer unreachable — falling back to direct PostgreSQL', {
+        error: pgErr?.message ?? pgErr,
+      });
+      await _current.$disconnect().catch(() => {});
+    }
+
+    // Swap to direct PostgreSQL
+    if (!DATABASE_URL) {
+      logger.error('No DATABASE_URL fallback — shutting down');
+      process.exit(1);
+    }
+    _current = makeDirectClient();
+  }
+
+  // Direct PostgreSQL (primary or fallback)
+  try {
+    await _current.$connect();
+    const mode = PGBOUNCER_URL
+      ? 'Direct PostgreSQL fallback (pool=25)'
+      : 'Direct PostgreSQL (pool=25)';
+    logger.info(`Database connected successfully [${mode}]`);
+  } catch (err: any) {
+    logger.error('Database connection failed', { error: err?.message ?? err });
+    process.exit(1);
+  }
+};
+
+bootstrap();
+
 process.on('beforeExit', async () => {
-  await prisma.$disconnect();
+  await _current.$disconnect();
   logger.info('Database disconnected');
 });
 
 export default prisma;
-
