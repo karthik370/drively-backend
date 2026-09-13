@@ -47,18 +47,37 @@ const prisma = new Proxy(
 ) as PrismaClient;
 
 // ── Connection bootstrap ──────────────────────────────────────────────────────
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
 const bootstrap = async () => {
   if (PGBOUNCER_URL) {
-    try {
-      await _current.$connect();
-      logger.info('Database connected successfully [PgBouncer (pool=50)]');
-      return;
-    } catch (pgErr: any) {
-      logger.warn('PgBouncer unreachable — falling back to direct PostgreSQL', {
-        error: pgErr?.message ?? pgErr,
-      });
-      await _current.$disconnect().catch(() => {});
+    // PgBouncer may still be establishing its upstream Postgres connection at
+    // container startup. Retry up to 3 times with 2-second delays before
+    // giving up and falling back to direct PostgreSQL.
+    const MAX_PGBOUNCER_ATTEMPTS = 3;
+    let lastPgErr: any;
+
+    for (let attempt = 1; attempt <= MAX_PGBOUNCER_ATTEMPTS; attempt++) {
+      try {
+        await _current.$connect();
+        logger.info('Database connected successfully [PgBouncer (pool=50)]');
+        return;
+      } catch (err: any) {
+        lastPgErr = err;
+        if (attempt < MAX_PGBOUNCER_ATTEMPTS) {
+          logger.info(`PgBouncer attempt ${attempt}/${MAX_PGBOUNCER_ATTEMPTS} failed — retrying in 2s...`, {
+            error: err?.message ?? err,
+          });
+          await _current.$disconnect().catch(() => {});
+          await sleep(2000);
+        }
+      }
     }
+
+    logger.warn('PgBouncer unreachable after 3 attempts — falling back to direct PostgreSQL', {
+      error: lastPgErr?.message ?? lastPgErr,
+    });
+    await _current.$disconnect().catch(() => {});
 
     // Swap to direct PostgreSQL
     if (!DATABASE_URL) {
