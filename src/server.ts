@@ -22,6 +22,7 @@ import swaggerDocs from './config/swagger';
 import { initScheduledBookingProcessor } from './services/scheduledBooking.service';
 import { MembershipService } from './services/membership.service';
 import { initPaymentReconciliation } from './services/paymentReconciliation.service';
+import { dbReady } from './config/database';
 
 import authRoutes from './routes/auth.routes';
 import userRoutes from './routes/user.routes';
@@ -397,19 +398,22 @@ const startServer = async () => {
 
     initializeSocket(io);
 
-    void MembershipService.ensureDefaultPlans().catch((error) => {
-      logger.error('Failed to ensure default plans:', error);
-    });
+    // ── Wait for DB (PgBouncer or fallback) before running seeds & init jobs ──
+    void dbReady.then(async () => {
+      // Membership plans
+      await MembershipService.ensureDefaultPlans().catch((error: any) => {
+        logger.error('Failed to ensure default plans:', error);
+      });
 
-    void initScheduledBookingProcessor().catch((error) => {
-      logger.error('Failed to start scheduled booking processor:', error);
-    });
+      // Scheduled bookings
+      await initScheduledBookingProcessor().catch((error: any) => {
+        logger.error('Failed to start scheduled booking processor:', error);
+      });
 
-    // ── Payment reconciliation: catches webhook-missed subscription payments ──────
-    initPaymentReconciliation();
+      // ── Payment reconciliation: catches webhook-missed subscription payments ──────
+      initPaymentReconciliation();
 
-    // Seed default driver badges — runs once per server process only
-    void (async () => {
+      // Driver badges
       try {
         const { BadgeService } = await import('./services/badge.service');
         await BadgeService.seedDefaultBadges();
@@ -417,7 +421,7 @@ const startServer = async () => {
       } catch (error) {
         logger.error('Failed to seed default badges:', error);
       }
-    })();
+    });
 
     // ── Hourly cleanup: delete expired Cloudinary trip photos (24hrs after trip ends) ──
     const PHOTO_CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour

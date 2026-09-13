@@ -81,7 +81,8 @@ const bootstrap = async () => {
   }
 };
 
-bootstrap();
+// Export the ready-promise so callers can await DB before running seeds/jobs.
+export const dbReady = bootstrap();
 
 process.on('beforeExit', async () => {
   await _current.$disconnect();
