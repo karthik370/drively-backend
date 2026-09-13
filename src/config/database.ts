@@ -20,7 +20,11 @@ const makePgBouncerClient = () =>
       db: {
         url: appendParams(
           PGBOUNCER_URL,
-          'pgbouncer=true&statement_cache_size=0&connection_limit=50&pool_timeout=30'
+          // pgbouncer=true: disables prepared statements (required for transaction mode)
+          // statement_cache_size=0: required for PgBouncer transaction pooling
+          // connection_limit: Prisma internal pool (PgBouncer itself handles the 1000 client cap)
+          // pool_timeout: wait up to 60s for a connection slot before erroring
+          'pgbouncer=true&statement_cache_size=0&connection_limit=50&pool_timeout=60'
         ),
       },
     },
@@ -31,7 +35,12 @@ const makeDirectClient = () =>
     log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
     datasources: {
       db: {
-        url: appendParams(DATABASE_URL, 'connection_limit=25&pool_timeout=30'),
+        url: appendParams(
+          DATABASE_URL,
+          // Railway Postgres default max_connections = 100.
+          // Use 90 leaving 10 for migrations, admin, and Railway's own health checks.
+          'connection_limit=90&pool_timeout=60'
+        ),
       },
     },
   });
