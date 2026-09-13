@@ -3,7 +3,7 @@ import prisma from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { AppError, asyncHandler } from '../middleware/errorHandler';
 import { getSocketServer } from '../socket/io';
-import { VerificationStatus } from '@prisma/client';
+import { VerificationStatus, BookingStatus } from '@prisma/client';
 
 const hasSubmittedDocs = (p: any): boolean => {
   const licenseImgOk = typeof p?.licenseImageUrl === 'string' && p.licenseImageUrl.trim().length > 0;
@@ -362,10 +362,23 @@ export class AdminController {
   static getAllBookings = asyncHandler(async (req: AuthRequest, res: Response) => {
     const limit  = Math.min(Number(req.query.limit  ?? 50), 100);
     const offset = Number(req.query.offset ?? 0);
-    const statusFilter = req.query.status ? String(req.query.status).split(',') : undefined;
+
+    // Parse comma-separated status filter and validate each against the BookingStatus enum.
+    // Using Object.values() ensures Prisma receives properly-typed enum values, not raw strings.
+    const validStatuses = new Set(Object.values(BookingStatus));
+    const statusFilter: BookingStatus[] | undefined = req.query.status
+      ? String(req.query.status)
+          .split(',')
+          .map(s => s.trim())
+          .filter(s => validStatuses.has(s as BookingStatus)) as BookingStatus[]
+      : undefined;
+
+    if (req.query.status && statusFilter?.length === 0) {
+      throw new AppError('Invalid status filter values', 400);
+    }
 
     const bookings = await prisma.booking.findMany({
-      where: statusFilter?.length ? { status: { in: statusFilter as any } } : undefined,
+      where: statusFilter?.length ? { status: { in: statusFilter } } : undefined,
       orderBy: { createdAt: 'desc' },
       take: limit,
       skip: offset,
