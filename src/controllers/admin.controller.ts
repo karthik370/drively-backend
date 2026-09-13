@@ -356,6 +356,43 @@ export class AdminController {
       data: { userId: user.id, amount, note },
     });
   });
+
+  // ── All Bookings (Admin Live Monitor) ─────────────────────────────────────
+  // GET /admin/bookings?limit=50&offset=0&status=REQUESTED,SEARCHING,...
+  static getAllBookings = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const limit  = Math.min(Number(req.query.limit  ?? 50), 100);
+    const offset = Number(req.query.offset ?? 0);
+    const statusFilter = req.query.status ? String(req.query.status).split(',') : undefined;
+
+    const bookings = await prisma.booking.findMany({
+      where: statusFilter?.length ? { status: { in: statusFilter as any } } : undefined,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      skip: offset,
+      include: {
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phoneNumber: true,
+            profileImage: true,
+          },
+        },
+        driver: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phoneNumber: true,
+            profileImage: true,
+          },
+        },
+      },
+    });
+
+    res.json({ success: true, data: bookings });
+  });
 }
 
 export default AdminController;

@@ -701,6 +701,52 @@ export class BookingService {
       }
     })();
 
+    // ── Notify Admin of new booking ─────────────────────────────────────────
+    void (async () => {
+      try {
+        const adminRaw = (
+          process.env.ADMIN_PHONE_NUMBERS ||
+          process.env.ADMIN_PHONES ||
+          process.env.ADMIN_PHONE ||
+          process.env.ADMIN_ALLOWLIST || ''
+        );
+        const adminLastTen = adminRaw
+          .split(/[,\s]+/)
+          .map((p: string) => p.replace(/\D/g, '').slice(-10))
+          .filter(Boolean);
+
+        if (adminLastTen.length > 0) {
+          const adminUsers = await prisma.user.findMany({
+            where: { OR: adminLastTen.map((last10: string) => ({ phoneNumber: { endsWith: last10 } })) },
+            select: { id: true },
+          });
+          const adminIds = adminUsers.map((u: any) => u.id);
+          if (adminIds.length > 0) {
+            const customerName = `${(booking as any).customer?.firstName || ''} ${(booking as any).customer?.lastName || ''}`.trim();
+            const pickup = String((booking as any).pickupAddress || '').substring(0, 60);
+            await sendExpoPushNotification({
+              userIds: adminIds,
+              title: '🚗 New Booking',
+              body: `${customerName || 'Customer'} → ${pickup}`,
+              data: { type: 'admin_new_booking', bookingId: booking.id, screen: 'AdminBookings' },
+            });
+            const io2 = getSocketServer();
+            adminIds.forEach((adminId: string) => {
+              io2.to(`user:${adminId}`).emit('admin:booking_created', {
+                bookingId: booking.id,
+                customerName,
+                pickup,
+                totalAmount: String((booking as any).totalAmount || 0),
+                status: 'REQUESTED',
+              });
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('[Admin] Failed to notify admin of new booking', { error: err });
+      }
+    })();
+
     const scheduledAt = booking.scheduledTime ? new Date(booking.scheduledTime as any) : null;
     const now = Date.now();
     const shouldStartNow = !scheduledAt || scheduledAt.getTime() <= now;

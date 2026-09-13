@@ -24,4 +24,7 @@ router.post('/payouts/:payoutId/reject', AdminController.rejectPayout);
 // POST /admin/wallet/credit  { phone, amount, note? }
 router.post('/wallet/credit', AdminController.manualWalletCredit);
 
+// 📋 Admin bookings live monitor
+router.get('/bookings', AdminController.getAllBookings);
+
 export default router;
